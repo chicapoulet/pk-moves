@@ -151,7 +151,7 @@ function validationRow(v) {
 function memberRow(r, pos, toReview) {
   const p = pct(r.done, r.total);
   return h('li', { class: r.user_id === me.id ? 'me' : '' }, h('a', { class: 'row', href: '#user/' + r.user_id },
-    toReview && h('span', { class: 'pastille', role: 'img', 'aria-label': 'A un move à valider' }),
+    toReview && h('span', { class: 'pastille', role: 'img', 'aria-label': 'A un move sans avis' }),
     pos != null && h('span', { class: 'pos' }, ['🥇', '🥈', '🥉'][pos] || pos + 1),
     avatar(r.username, r.avatar_path),
     h('span', { class: 'grow' }, h('strong', {}, r.username + (r.user_id === me.id ? ' (toi)' : '')),
@@ -462,8 +462,9 @@ async function chat() {
 }
 
 async function rank() {
-  const [lb, todo] = await Promise.all([q(sb.from('v_leaderboard').select('*')), q(sb.from('v_to_review').select('user_id'))]);
-  const waiting = new Set(todo.map(v => v.user_id)); // pastille rouge : il a un move que je n'ai pas encore jugé
+  const [lb, todo] = await Promise.all([q(sb.from('v_leaderboard').select('*')),
+    q(sb.from('v_validations').select('user_id').eq('ok_count', 0).eq('ko_count', 0).neq('user_id', me.id))]);
+  const waiting = new Set(todo.map(v => v.user_id)); // pastille rouge : il a un move que personne n'a encore validé ni refusé
   return [h('h1', { class: 'page-title' }, 'Classement'), h('p', { class: 'muted sub' }, "% de la liste validée · touche quelqu'un pour voir son profil"),
     h('ol', { class: 'list rank' }, sortRank(lb).map((r, i) => memberRow(r, i, waiting.has(r.user_id))))];
 }

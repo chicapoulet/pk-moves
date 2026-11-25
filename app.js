@@ -306,7 +306,7 @@ function pushCard() {
   if (!pushOk || Notification.permission !== 'default') return null;
   return h('button', { class: 'card install', onclick: e => busy(e.currentTarget, enablePush) }, icon('bell'),
     h('span', { class: 'grow' }, h('strong', {}, 'Active les notifs sur ton tél'),
-      h('small', { class: 'muted' }, me.is_admin ? 'Votes sur tes moves, nouveaux posts et moves proposés' : 'Votes sur tes moves et nouveaux posts de la team')));
+      h('small', { class: 'muted' }, 'Nouveaux moves postés et votes sur les tiens')));
 }
 
 function installCard() {
@@ -437,6 +437,8 @@ async function chat() {
     const atBottom = innerHeight + scrollY >= document.body.scrollHeight - 120;
     if (!last) listEl.replaceChildren(); // enlève « aucun message »
     last = rows.at(-1).id;
+    localStorage.setItem(CHAT_SEEN, last); // lu : la pastille de l'onglet Chat disparaît
+    document.querySelector('.tabs a[data-tab="chat"]')?.classList.remove('unread');
     listEl.append(...rows.map(bubble));
     if (atBottom) form.scrollIntoView({ block: 'end' });
   }
@@ -883,9 +885,22 @@ async function fetchNotifs() {
   return { reviews, proposals, noVideo: mineList.filter(v => !v.video_path && !v.invalid), invalid: mineList.filter(v => v.invalid) };
 }
 
+// pastille rouge sur l'onglet Chat : un message d'un autre, plus récent que le dernier lu sur ce téléphone
+const CHAT_SEEN = 'pk-chat-seen';
+async function refreshChatDot() {
+  const tab = document.querySelector('.tabs a[data-tab="chat"]');
+  const [newest] = await q(sb.from('chat_messages').select('id').neq('user_id', me.id).order('id', { ascending: false }).limit(1)).catch(() => []);
+  const unread = !!newest && newest.id > +(localStorage.getItem(CHAT_SEEN) || 0);
+  tab?.classList.toggle('unread', unread);
+  tab?.setAttribute('aria-label', unread ? 'Chat (nouveaux messages)' : 'Chat');
+}
+// en revenant sur l'app (sortie de veille, autre appli) : cloche et pastille à jour
+document.addEventListener('visibilitychange', () => !document.hidden && me?.username && refreshBadge());
+
 async function refreshBadge() {
   const badge = document.getElementById('badge');
   if (!badge) return;
+  refreshChatDot();
   try {
     const { reviews, proposals, noVideo, invalid } = await fetchNotifs();
     const seen = localStorage.getItem(SEEN_KEY) || '';

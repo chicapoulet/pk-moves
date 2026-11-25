@@ -293,3 +293,5 @@ h3 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: 
   display: flex; gap: 8px; margin-top: 14px; padding: 8px; border-radius: var(--r); background: var(--bg);
 }
 .chat-form input { flex: 1; min-width: 0; }
+.tabs a { position: relative; }
+.tabs a.unread::after { content: ""; position: absolute; top: 9px; left: calc(50% + 7px); width: 10px; height: 10px; border-radius: 50%; background: var(--ko); border: 2px solid var(--surface); }

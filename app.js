@@ -531,6 +531,7 @@ function uploadForm(m, v) {
   // découpe : on choisit le début puis la durée. Pendant qu'on glisse, l'aperçu montre l'image en direct ;
   // quand on relâche, il rejoue le passage gardé en boucle (= le rendu final)
   const preview = h('video', { class: 'video', playsinline: true, muted: true, hidden: true });
+  preview.muted = true; // l'attribut seul ne coupe pas le son : sans ça, le téléphone bloque la lecture auto en boucle
   const startIn = h('input', { type: 'range', min: 0, step: 0.1, value: 0, 'aria-label': 'Début du passage' });
   const lenIn = h('input', { type: 'range', min: 0.5, step: 0.1, value: MAX_CLIP, 'aria-label': 'Durée du passage' });
   const sel = h('span', {}), summary = h('b', {});

@@ -272,3 +272,24 @@ h3 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: 
 @keyframes spin { to { rotate: 360deg; } }
 @keyframes pulse { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
+.propose { margin-top: 16px; }
+.proposal { display: flex; flex-direction: column; gap: 8px; }
+.avatar.small { width: 30px; height: 30px; font-size: .8rem; }
+.rank .row { position: relative; }
+.pastille { position: absolute; top: -5px; left: -5px; width: 16px; height: 16px; border-radius: 50%; background: var(--ko); border: 2px solid var(--bg); }
+.post .quick { padding: 0 14px 14px; }
+.seg button { font-size: .82rem; padding: 0 2px; white-space: nowrap; }
+.chat { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.chat li { display: flex; align-items: flex-end; gap: 8px; max-width: 85%; }
+.chat li.mine { align-self: flex-end; }
+.chat li > div { padding: 8px 12px; border-radius: 16px 16px 16px 4px; background: var(--surface); }
+.chat li.mine > div { border-radius: 16px 16px 4px 16px; background: color-mix(in srgb, var(--accent) 16%, var(--surface)); }
+.chat li.empty { max-width: none; display: block; }
+.chat strong { display: block; font-size: .8rem; color: var(--muted); }
+.chat p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat small { font-size: .72rem; }
+.chat-form {
+  position: sticky; bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 8px);
+  display: flex; gap: 8px; margin-top: 14px; padding: 8px; border-radius: var(--r); background: var(--bg);
+}
+.chat-form input { flex: 1; min-width: 0; }

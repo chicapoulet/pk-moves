@@ -11,3 +11,17 @@ self.addEventListener('fetch', e => {
     return res;
   }).catch(() => caches.match(e.request)));
 });
+
+// notifs envoyées par l'Edge Function « push » : { title, body, url }
+self.addEventListener('push', e => {
+  const m = e.data ? e.data.json() : {};
+  e.waitUntil(self.registration.showNotification(m.title || 'PK Moves', { body: m.body || '', icon: 'icon-192.png', data: m.url || './', tag: m.url }));
+});
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  const url = new URL(e.notification.data, self.registration.scope).href;
+  e.waitUntil(clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    const win = list.find(c => c.url.startsWith(self.registration.scope));
+    return win ? win.focus().then(c => c.navigate(url)) : clients.openWindow(url);
+  }));
+});

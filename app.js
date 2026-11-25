@@ -359,8 +359,9 @@ async function home() {
       h('p', {}, `#${ranked.findIndex(r => r.user_id === me.id) + 1} sur ${ranked.length} dans la team`))),
     noVideo > 0 && h('button', { class: 'card alert', onclick: openNotifs }, icon('video'),
       h('span', {}, `${noVideo} move${noVideo > 1 ? 's' : ''} sans vidéo — ajoute-la pour que la team vérifie`)),
+    // 10 à la fois : après un avis la page se recharge (refreshValidation) et le suivant remonte
+    section(`À valider (${toReview.length})`, toReview.length ? list(toReview.slice(0, 10).map(validationRow)) : empty('Tu as donné ton avis sur tous les posts. 👌')),
     section('Prochains moves à faire', next.length ? list(next.map(m => moveRow(m))) : empty('Tu as toute la liste. Respect. 🔥')),
-    section(`À valider (${toReview.length})`, toReview.length ? list(toReview.map(validationRow)) : empty('Tu as donné ton avis sur tous les posts. 👌')),
   ];
 }
 

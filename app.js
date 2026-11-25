@@ -234,12 +234,15 @@ const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platfo
 
 function installTuto(ios = isIos) {
   const steps = ios
-    ? ['Ouvre ce site dans Safari.', 'Touche le bouton Partager (le carré avec une flèche vers le haut).', 'Choisis « Sur l’écran d’accueil ».', 'Touche « Ajouter » : l’icône PK Moves apparaît avec tes apps.']
-    : ['Touche les 3 petits points ⋮ du navigateur (en haut à droite).', 'Choisis « Ajouter à l’écran d’accueil » (ou « Installer l’application »).', 'Confirme : l’icône PK Moves apparaît avec tes apps.'];
+    ? ['Ouvre ce site dans Safari.', 'Touche le bouton Partager (le carré avec une flèche vers le haut).', 'Choisis « Sur l’écran d’accueil » (fais défiler si besoin).',
+      'Laisse « Ouvrir en tant qu’app web » activé si c’est proposé, puis touche « Ajouter ».']
+    : ['Ouvre ce site dans Chrome.', 'Touche les 3 petits points ⋮ (en haut à droite), puis « Installer l’application » ou « Ajouter à l’écran d’accueil ».',
+      'Si on te demande, choisis « Installer » (pas « Créer un raccourci »).'];
   openSheet('Installe PK Moves sur ton tél', h('div', { class: 'stack' },
     h('div', { class: 'tuto-head' }, h('img', { src: 'icon-192.png', alt: '', class: 'tuto-icon' }),
       h('p', {}, 'Mets l’app sur ton écran d’accueil : elle s’ouvre en plein écran comme une vraie app, et tu restes connecté.')),
     h('ol', { class: 'tuto' }, steps.map(s => h('li', {}, s))),
+    h('p', { class: 'hint' }, 'Tu as déjà une icône PK Moves qui ouvre le navigateur ? Supprime-la et refais ces étapes : la nouvelle s’ouvre en plein écran, comme une vraie app.'),
     h('button', { class: 'btn ghost small', onclick: () => installTuto(!ios) }, ios ? 'Tu as un Android ?' : 'Tu as un iPhone ?'),
     h('div', { class: 'vote' },
       h('button', { class: 'btn primary', onclick: () => sheet.close() }, "J'ai compris"),

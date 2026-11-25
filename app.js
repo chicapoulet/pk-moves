@@ -160,7 +160,7 @@ function showAuth() {
   const field = (label, input) => h('label', { class: 'field' }, h('span', {}, label), input);
   const render = () => app.replaceChildren(h('main', { class: 'auth' }, h('form', { class: 'auth-card', onsubmit: submit },
     h('div', { class: 'brand' }, h('span', { class: 'logo', 'aria-hidden': 'true' }, 'PK'), h('h1', {}, 'PK Moves')),
-    h('p', { class: 'muted' }, signup ? 'Crée ton compte pour rejoindre la team.' : 'Connecte-toi pour suivre ta progression.'),
+    h('p', { class: 'muted' }, signup ? 'Crée ton compte pour rejoindre la team.' : 'Bienvenue ! Connecte-toi pour voir la progression de chacun.'),
     field('Nom', h('input', { name: 'username', required: true, minlength: 2, maxlength: 24, autocomplete: 'username', autocapitalize: 'off' })),
     field('Mot de passe', h('input', { name: 'password', type: 'password', required: true, minlength: 6, autocomplete: signup ? 'new-password' : 'current-password' })),
     h('button', { class: 'btn primary block', type: 'submit' }, signup ? 'Créer mon compte' : 'Se connecter'),

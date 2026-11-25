@@ -273,7 +273,6 @@ function maybeInstallTuto() {
 }
 
 // ───────────── Notifs sur le téléphone ─────────────
-const VAPID_PUBLIC = 'BHnaOjjRQx6F15iEPxmumXXd1JTZ_dmIBWkI0uHJJN7NC4k_vtEjTLWDHIht3i44F8IGnghix0uTEmgT5XXG3kc'; // clé publique : la privée est dans l'Edge Function « push »
 const pushOk = 'PushManager' in window && 'Notification' in window && 'serviceWorker' in navigator;
 const pushSub = () => navigator.serviceWorker.ready.then(r => r.pushManager.getSubscription());
 
@@ -284,8 +283,10 @@ async function savePush(sub) {
 
 async function enablePush() {
   if (await Notification.requestPermission() !== 'granted') throw new Error('Notifs refusées : autorise-les dans les réglages du téléphone.');
+  const [k] = await q(sb.from('push_keys').select('public_key')); // clé publique créée par l'Edge Function « push »
+  if (!k) throw new Error('Les notifs ne sont pas encore prêtes, réessaie plus tard.');
   const reg = await navigator.serviceWorker.ready;
-  const key = Uint8Array.from(atob(VAPID_PUBLIC.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+  const key = Uint8Array.from(atob(k.public_key.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
   await savePush(await reg.pushManager.getSubscription() || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
   toast('Notifs activées 🔔');
   route();

@@ -153,6 +153,44 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent); }
 .error { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 24px; text-align: center; }
 .skel { height: 56px; margin-bottom: 6px; border-radius: 12px; background: var(--surface); animation: pulse 1.2s ease-in-out infinite; }
 
+img.avatar { object-fit: cover; }
+.avatar.big { width: 84px; height: 84px; font-size: 2rem; }
+.photo-btn { align-self: flex-start; margin-top: 8px; cursor: pointer; }
+
+.install {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; cursor: pointer;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+.install > .ic { color: var(--accent); }
+.tuto-head { display: flex; align-items: center; gap: 14px; }
+.tuto-icon { width: 60px; height: 60px; border-radius: 14px; flex: none; }
+.tuto { list-style: none; counter-reset: step; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.tuto li { counter-increment: step; display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 12px; background: var(--surface); }
+.tuto li::before {
+  content: counter(step); flex: none; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--accent); color: var(--accent-ink); font-weight: 800;
+}
+
+.trim { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 12px; background: var(--surface); }
+.trim .hint { text-align: left; }
+.trim-row { display: grid; grid-template-columns: 44px 1fr 52px; align-items: center; gap: 10px; font-size: .85rem; color: var(--muted); }
+.trim-row b { color: var(--text); font-variant-numeric: tabular-nums; text-align: right; }
+.trim-row input { padding: 0; accent-color: var(--accent); }
+
+.feed { display: flex; flex-direction: column; gap: 14px; }
+.post { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+.post-head, .post-foot {
+  width: 100%; display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+  border: 0; background: transparent; text-align: left; cursor: pointer;
+}
+.post-move { padding: 0 14px 10px; font-size: 1.1rem; }
+.post .video { border-radius: 0; display: block; }
+.post .novideo { margin: 0 14px; padding: 16px; }
+.post-foot { font-weight: 700; font-size: .9rem; }
+.post-foot .ok { color: var(--ok); }
+.post-foot .ko { color: var(--ko); }
+.post-foot .muted { font-weight: 600; }
+
 .toolbar { display: flex; flex-direction: column; gap: 10px; margin-top: -8px; }
 .seg { display: flex; padding: 3px; gap: 3px; background: var(--surface); border-radius: 12px; }
 .seg button { flex: 1; min-height: 38px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font-weight: 600; cursor: pointer; }

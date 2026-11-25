@@ -2,7 +2,9 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
-const MAX_VIDEO = 50 * 1024 * 1024; // même limite que le bucket (plan gratuit Supabase)
+// vidéo coupée à 8 s max et réencodée en 480p (≈ 400 Ko) : 210 moves × 10 comptes tiennent dans le 1 Go gratuit
+const MAX_CLIP = 8;
+const MEDIABUNNY = 'https://cdn.jsdelivr.net/npm/mediabunny@1.66.4/dist/bundles/mediabunny.min.mjs';
 const SEEN_KEY = 'pk-seen';
 const app = document.getElementById('app');
 const sheet = document.getElementById('sheet');
@@ -35,6 +37,8 @@ const ICONS = {
   logout: '<path d="M15 4h4a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-4M10 17l-5-5 5-5M5 12h11"/>',
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   video: '<rect x="2.5" y="6" width="13" height="12" rx="2"/><path d="m15.5 10.5 6-3.5v10l-6-3.5"/>',
+  play: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="m10 9 5 3-5 3z"/>',
+  download: '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
 };
 function icon(name) {
   const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -57,11 +61,11 @@ async function q(request) {
 
 function msg(e) {
   const m = e?.message || String(e);
-  if (/Invalid login/i.test(m)) return 'Email ou mot de passe incorrect.';
-  if (/already registered/i.test(m)) return 'Cet email a déjà un compte.';
-  if (/Database error saving new user/i.test(m)) return 'Ce pseudo est déjà pris.';
-  if (/Email not confirmed/i.test(m)) return 'Confirme ton email avec le lien reçu, puis reconnecte-toi.';
+  if (/Invalid login/i.test(m)) return 'Nom ou mot de passe incorrect.';
+  if (/already registered|Database error saving new user/i.test(m)) return 'Ce nom est déjà pris.';
   if (/Password should/i.test(m)) return 'Mot de passe : 6 caractères minimum.';
+  if (/exceeded the maximum/i.test(m)) return 'Vidéo trop lourde : garde un passage plus court.';
+  if (/unsupported or unrecognizable/i.test(m)) return 'Vidéo illisible : choisis-en une autre.';
   if (/Failed to fetch|NetworkError|Load failed/i.test(m)) return 'Pas de connexion au serveur.';
   return m;
 }
@@ -103,10 +107,14 @@ const bar = p => h('span', { class: 'bar', 'aria-hidden': 'true' }, h('span', { 
 const empty = text => h('p', { class: 'empty' }, text);
 const list = items => h('ul', { class: 'list' }, items);
 const section = (title, content) => h('section', {}, h('h2', { class: 'section-title' }, title), content);
-function avatar(name = '?') {
+function avatar(name = '?', path = null, cls = '') {
+  if (path) return h('img', { class: 'avatar ' + cls, src: sb.storage.from('avatars').getPublicUrl(path).data.publicUrl, alt: '', loading: 'lazy' });
   const hue = [...name].reduce((a, c) => a + c.charCodeAt(0), 0) * 37 % 360;
-  return h('span', { class: 'avatar', style: `--h:${hue}`, 'aria-hidden': 'true' }, name[0].toUpperCase());
+  return h('span', { class: 'avatar ' + cls, style: `--h:${hue}`, 'aria-hidden': 'true' }, name[0].toUpperCase());
 }
+
+// #t=0.1 : montre la 1re image sur iPhone
+const videoEl = url => h('video', { src: url + '#t=0.1', controls: true, playsinline: true, preload: 'metadata', class: 'video' });
 const errorState = e => h('div', { class: 'error', role: 'alert' }, h('p', {}, msg(e)), h('button', { class: 'btn', onclick: route }, 'Réessayer'));
 const skeleton = () => h('div', { 'aria-busy': 'true', 'aria-label': 'Chargement' }, [1, 2, 3, 4, 5].map(() => h('div', { class: 'skel' })));
 
@@ -120,7 +128,7 @@ function moveRow(m) {
 
 function validationRow(v, showUser) {
   return h('li', {}, h('button', { class: 'row', onclick: () => openValidation(v) },
-    showUser && avatar(v.username),
+    showUser && avatar(v.username, v.avatar_path),
     h('span', { class: 'grow' }, h('strong', {}, v.move_name),
       h('small', { class: 'muted' }, (showUser ? v.username + ' · ' : '') + ago(v.created_at) + (v.video_path ? ' · 📹' : ''))),
     chip(status(v))));
@@ -130,13 +138,21 @@ function memberRow(r, pos) {
   const p = pct(r.done, r.total);
   return h('li', { class: r.user_id === me.id ? 'me' : '' }, h('a', { class: 'row', href: '#user/' + r.user_id },
     pos != null && h('span', { class: 'pos' }, ['🥇', '🥈', '🥉'][pos] || pos + 1),
-    avatar(r.username),
+    avatar(r.username, r.avatar_path),
     h('span', { class: 'grow' }, h('strong', {}, r.username + (r.user_id === me.id ? ' (toi)' : '')),
       h('small', { class: 'muted' }, `${r.done} / ${r.total} moves`), bar(p)),
     h('span', { class: 'pct' }, p + '%')));
 }
 
 // ───────────── Connexion ─────────────
+// Supabase veut un email : on le fabrique à partir du nom. Aucun mail n'est envoyé
+// (inscription confirmée d'office) et « .invalid » est un domaine qui n'existe jamais.
+function nameEmail(name) {
+  const id = name.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '.').replace(/^\.|\.$/g, '');
+  return id.length >= 2 ? id + '@pk-moves.invalid' : null;
+}
+
 function showAuth() {
   me = null;
   sheet.open && sheet.close();
@@ -145,8 +161,7 @@ function showAuth() {
   const render = () => app.replaceChildren(h('main', { class: 'auth' }, h('form', { class: 'auth-card', onsubmit: submit },
     h('div', { class: 'brand' }, h('span', { class: 'logo', 'aria-hidden': 'true' }, 'PK'), h('h1', {}, 'PK Moves')),
     h('p', { class: 'muted' }, signup ? 'Crée ton compte pour rejoindre la team.' : 'Connecte-toi pour suivre ta progression.'),
-    signup && field('Pseudo', h('input', { name: 'username', required: true, minlength: 2, maxlength: 24, autocomplete: 'nickname' })),
-    field('Email', h('input', { name: 'email', type: 'email', required: true, autocomplete: 'email' })),
+    field('Nom', h('input', { name: 'username', required: true, minlength: 2, maxlength: 24, autocomplete: 'username', autocapitalize: 'off' })),
     field('Mot de passe', h('input', { name: 'password', type: 'password', required: true, minlength: 6, autocomplete: signup ? 'new-password' : 'current-password' })),
     h('button', { class: 'btn primary block', type: 'submit' }, signup ? 'Créer mon compte' : 'Se connecter'),
     h('button', { class: 'btn ghost block', type: 'button', onclick: () => { signup = !signup; render(); } },
@@ -154,11 +169,11 @@ function showAuth() {
   function submit(e) {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
-    if (signup && f.username.trim().length < 2) return toast('Pseudo : 2 caractères minimum.', true);
+    const email = nameEmail(f.username);
+    if (!email) return toast('Ton nom doit contenir au moins 2 lettres ou chiffres.', true);
     busy(e.submitter, async () => {
-      if (!signup) return void await q(sb.auth.signInWithPassword({ email: f.email, password: f.password }));
-      const data = await q(sb.auth.signUp({ email: f.email, password: f.password, options: { data: { username: f.username.trim() } } }));
-      if (!data.session) toast('Compte créé ! Clique sur le lien reçu par mail, puis connecte-toi.');
+      if (!signup) return void await q(sb.auth.signInWithPassword({ email, password: f.password }));
+      await q(sb.auth.signUp({ email, password: f.password, options: { data: { username: f.username.trim() } } }));
     });
   }
   render();
@@ -177,13 +192,14 @@ async function start(user) {
   me = { id: user.id };
   try {
     const [profile, list] = await Promise.all([
-      q(sb.from('profiles').select('username').eq('id', user.id).single()),
+      q(sb.from('profiles').select('username,avatar_path').eq('id', user.id).single()),
       q(sb.from('moves').select('id,name').order('id')),
     ]);
-    me.username = profile.username;
+    Object.assign(me, profile);
     moves = list;
     shell();
     route();
+    maybeInstallTuto();
   } catch (e) {
     me = null;
     app.replaceChildren(h('main', { class: 'auth' }, h('div', { class: 'auth-card' }, h('p', {}, msg(e)),
@@ -193,7 +209,7 @@ async function start(user) {
 }
 
 // ───────────── Squelette + navigation ─────────────
-const TABS = [['home', 'Accueil', 'home'], ['team', 'Team', 'users'], ['rank', 'Classement', 'trophy'], ['moves', 'Mes moves', 'list']];
+const TABS = [['home', 'Accueil', 'home'], ['posts', 'Posts', 'play'], ['team', 'Team', 'users'], ['rank', 'Classement', 'trophy'], ['moves', 'Mes moves', 'list']];
 
 function shell() {
   app.replaceChildren(
@@ -209,6 +225,40 @@ function shell() {
 
 window.addEventListener('hashchange', () => { window.scrollTo(0, 0); me?.username && route(); });
 
+// ───────────── Installer l'app sur le téléphone ─────────────
+const HIDE_INSTALL = 'pk-install-hide';
+window.addEventListener('appinstalled', () => localStorage.setItem(HIDE_INSTALL, '1'));
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+const installed = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+function installTuto(ios = isIos) {
+  const steps = ios
+    ? ['Ouvre ce site dans Safari.', 'Touche le bouton Partager (le carré avec une flèche vers le haut).', 'Choisis « Sur l’écran d’accueil ».', 'Touche « Ajouter » : l’icône PK Moves apparaît avec tes apps.']
+    : ['Touche les 3 petits points ⋮ du navigateur (en haut à droite).', 'Choisis « Ajouter à l’écran d’accueil » (ou « Installer l’application »).', 'Confirme : l’icône PK Moves apparaît avec tes apps.'];
+  openSheet('Installe PK Moves sur ton tél', h('div', { class: 'stack' },
+    h('div', { class: 'tuto-head' }, h('img', { src: 'icon-192.png', alt: '', class: 'tuto-icon' }),
+      h('p', {}, 'Mets l’app sur ton écran d’accueil : elle s’ouvre en plein écran comme une vraie app, et tu restes connecté.')),
+    h('ol', { class: 'tuto' }, steps.map(s => h('li', {}, s))),
+    h('button', { class: 'btn ghost small', onclick: () => installTuto(!ios) }, ios ? 'Tu as un Android ?' : 'Tu as un iPhone ?'),
+    h('div', { class: 'vote' },
+      h('button', { class: 'btn primary', onclick: () => sheet.close() }, "J'ai compris"),
+      h('button', { class: 'btn', onclick: () => { localStorage.setItem(HIDE_INSTALL, '1'); sheet.close(); route(); } }, 'Ne plus afficher'))));
+}
+
+// au lancement dans le navigateur : le tuto une fois par visite, tant que l'app n'est pas installée
+function maybeInstallTuto() {
+  if (installed() || localStorage.getItem(HIDE_INSTALL) || sessionStorage.getItem('pk-tuto')) return;
+  sessionStorage.setItem('pk-tuto', '1');
+  installTuto();
+}
+
+function installCard() {
+  if (installed() || localStorage.getItem(HIDE_INSTALL)) return null;
+  return h('button', { class: 'card install', onclick: () => installTuto() }, icon('download'),
+    h('span', { class: 'grow' }, h('strong', {}, "Installe l'app sur ton tél"), h('small', { class: 'muted' }, 'Voir comment faire (30 secondes)')));
+}
+
 async function route() {
   const token = ++routeToken;
   const [tab, arg] = (location.hash.slice(1) || 'home').split('/');
@@ -218,7 +268,7 @@ async function route() {
   if (!view.childElementCount) view.replaceChildren(skeleton());
   try {
     mine = new Map((await q(sb.from('v_validations').select('*').eq('user_id', me.id))).map(v => [v.move_id, v]));
-    const render = { home, team, rank, moves: movesView, user: () => userView(arg) }[tab] || home;
+    const render = { home, posts: postsView, team, rank, moves: movesView, user: () => userView(arg) }[tab] || home;
     const content = await render();
     if (token !== routeToken) return; // l'utilisateur a changé d'onglet entre-temps
     view.replaceChildren(...[content].flat().filter(Boolean));
@@ -243,6 +293,7 @@ async function home() {
   const noVideo = [...mine.values()].filter(v => !v.video_path && !v.invalid).length;
   const toReview = recent.filter(v => !voted.has(v.id)).slice(0, 8);
   return [
+    installCard(),
     h('section', { class: 'hero card' }, ring(p), h('div', {},
       h('p', { class: 'muted' }, 'Salut ' + me.username + ' 👋'),
       h('h1', {}, `${done} / ${moves.length} moves`),
@@ -252,6 +303,39 @@ async function home() {
     section('Prochains moves à valider', next.length ? list(next.map(moveRow)) : empty('Tu as toute la liste. Respect. 🔥')),
     section('À vérifier dans la team', toReview.length ? list(toReview.map(v => validationRow(v, true))) : empty("Rien à vérifier pour l'instant.")),
   ];
+}
+
+const PAGE = 15;
+async function postsView() {
+  const feed = h('div', { class: 'feed' });
+  const more = h('button', { class: 'btn block', hidden: true, onclick: () => busy(more, load) }, 'Voir plus');
+  let from = 0;
+  async function load() {
+    const rows = await q(sb.from('v_validations').select('*').order('created_at', { ascending: false }).range(from, from + PAGE - 1));
+    const paths = rows.map(v => v.video_path).filter(Boolean);
+    const signed = paths.length ? await q(sb.storage.from('videos').createSignedUrls(paths, 3600)) : [];
+    const urls = new Map(signed.map(s => [s.path, s.signedUrl]));
+    if (!from && !rows.length) feed.append(empty("Personne n'a encore posté. Lance-toi !"));
+    from += rows.length;
+    feed.append(...rows.map(v => postCard(v, urls.get(v.video_path))));
+    more.hidden = rows.length < PAGE;
+  }
+  await load();
+  return [h('h1', { class: 'page-title' }, 'Posts'), h('p', { class: 'muted sub' }, 'Les derniers moves postés par toute la team'), feed, more];
+}
+
+function postCard(v, url) {
+  const own = v.user_id === me.id;
+  const open = () => openValidation(v);
+  return h('article', { class: 'post' },
+    h('button', { class: 'post-head', onclick: open }, avatar(v.username, v.avatar_path),
+      h('span', { class: 'grow' }, h('strong', {}, own ? 'Toi' : v.username), h('small', { class: 'muted' }, ago(v.created_at))),
+      chip(status(v))),
+    h('h2', { class: 'post-move' }, v.move_name),
+    url ? videoEl(url) : h('div', { class: 'novideo' }, icon('video'), h('span', {}, 'Pas encore de vidéo')),
+    h('button', { class: 'post-foot', onclick: open },
+      h('span', { class: 'ok' }, `✓ ${v.ok_count}`), h('span', { class: 'ko' }, `✕ ${v.ko_count}`),
+      h('span', { class: 'grow' }), h('span', { class: 'muted' }, own ? 'Voir les avis →' : 'Donner mon avis →')));
 }
 
 async function team() {
@@ -295,10 +379,36 @@ async function userView(id) {
     q(sb.from('v_validations').select('*').eq('user_id', id).order('move_id')),
   ]);
   if (!p) return empty('Membre introuvable.');
+  const own = id === me.id, pc = pct(p.done, p.total);
   return [h('a', { class: 'back', href: '#team' }, '← Team'),
-    h('section', { class: 'hero card' }, ring(pct(p.done, p.total)), h('div', {},
-      h('h1', {}, p.username + (id === me.id ? ' (toi)' : '')), h('p', {}, `${p.done} / ${p.total} moves validés`))),
+    h('section', { class: 'hero card' }, avatar(p.username, p.avatar_path, 'big'), h('div', { class: 'grow' },
+      h('h1', {}, p.username + (own ? ' (toi)' : '')), h('p', {}, `${p.done} / ${p.total} moves validés · ${pc}%`), bar(pc),
+      own && h('label', { class: 'btn small photo-btn' }, '📷 Changer ma photo',
+        h('input', { type: 'file', accept: 'image/*', class: 'file', onchange: e => busy(e.target.closest('label'), () => changeAvatar(e.target.files[0])) })))),
     section('Moves postés', vals.length ? list(vals.map(v => validationRow(v, false))) : empty("Rien de posté pour l'instant."))];
+}
+
+// recadre au centre en carré 256 px : petite image, rapide à charger partout
+async function squareJpeg(file, size = 256) {
+  const img = new Image();
+  img.src = URL.createObjectURL(file);
+  try { await img.decode(); } catch { throw new Error('Image illisible, essaie une autre photo.'); }
+  finally { URL.revokeObjectURL(img.src); }
+  const side = Math.min(img.naturalWidth, img.naturalHeight);
+  const c = Object.assign(document.createElement('canvas'), { width: size, height: size });
+  c.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
+  return new Promise(ok => c.toBlob(ok, 'image/jpeg', 0.85));
+}
+
+async function changeAvatar(file) {
+  if (!file) return;
+  const path = `${me.id}/${Date.now()}.jpg`;
+  await q(sb.storage.from('avatars').upload(path, await squareJpeg(file), { contentType: 'image/jpeg' }));
+  await q(sb.from('profiles').update({ avatar_path: path }).eq('id', me.id));
+  if (me.avatar_path) sb.storage.from('avatars').remove([me.avatar_path]); // l'ancienne photo
+  me.avatar_path = path;
+  toast('Photo de profil changée 👌');
+  route();
 }
 
 // ───────────── Fenêtre du bas (détail d'un move) ─────────────
@@ -340,7 +450,7 @@ async function openValidation(v) {
     const myVote = reviews.find(r => r.reviewer_id === me.id && r.kind !== 'comment');
     body.replaceChildren(
       h('div', { class: 'meta' }, chip(status(v)), h('span', { class: 'muted' }, `posté par ${own ? 'toi' : v.username} · ${ago(v.created_at)}`)),
-      url ? h('video', { src: url, controls: true, playsinline: true, preload: 'metadata', class: 'video' })
+      url ? videoEl(url)
         : h('div', { class: 'novideo' }, icon('video'), h('span', {}, own ? 'Pas encore de vidéo.' : `Pas encore de vidéo, elle est demandée à ${v.username}.`)),
       h('div', { class: 'score' },
         h('span', { class: 'ok' }, `✓ ${v.ok_count} validation${v.ok_count > 1 ? 's' : ''}`),
@@ -360,16 +470,61 @@ function uploadForm(m, v) {
   const addOnly = v && !v.invalid;
   const input = h('input', { type: 'file', accept: 'video/*', class: 'file' });
   const picked = h('small', { class: 'muted' }, 'Aucune vidéo choisie');
+
+  // découpe : on règle le début et la fin du passage à garder sur l'aperçu
+  const preview = h('video', { class: 'video', playsinline: true, controls: true, muted: true, hidden: true });
+  const startIn = h('input', { type: 'range', min: 0, step: 0.1, value: 0, 'aria-label': 'Début du passage' });
+  const endIn = h('input', { type: 'range', min: 0, step: 0.1, value: 0, 'aria-label': 'Fin du passage' });
+  const startLbl = h('b', {}), endLbl = h('b', {});
+  const trimBox = h('div', { class: 'trim', hidden: true },
+    h('p', { class: 'hint' }, `✂️ Garde seulement le passage du move (${MAX_CLIP} s max)`),
+    h('label', { class: 'trim-row' }, h('span', {}, 'Début'), startIn, startLbl),
+    h('label', { class: 'trim-row' }, h('span', {}, 'Fin'), endIn, endLbl));
+  const fmt = s => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;
+  const clamp = (x, lo, hi) => Math.min(Math.max(x, lo), hi);
+  const syncTrim = moved => {
+    // passage de 0,5 s à MAX_CLIP s : on pousse l'autre curseur si besoin
+    if (moved === startIn) {
+      startIn.value = Math.min(+startIn.value, +startIn.max - 0.5);
+      endIn.value = clamp(+endIn.value, +startIn.value + 0.5, +startIn.value + MAX_CLIP);
+    } else if (moved === endIn) {
+      endIn.value = Math.max(+endIn.value, 0.5);
+      startIn.value = clamp(+startIn.value, +endIn.value - MAX_CLIP, +endIn.value - 0.5);
+    }
+    startLbl.textContent = fmt(+startIn.value);
+    endLbl.textContent = fmt(+endIn.value);
+    preview.currentTime = moved === endIn ? +endIn.value : +startIn.value;
+  };
+  startIn.addEventListener('input', () => syncTrim(startIn));
+  endIn.addEventListener('input', () => syncTrim(endIn));
+  const range = () => trimBox.hidden ? [0, MAX_CLIP] : [+startIn.value, +endIn.value];
+  // l'aperçu ne rejoue que le passage choisi
+  preview.addEventListener('timeupdate', () => { const [s, e] = range(); if (preview.currentTime >= e) { preview.pause(); preview.currentTime = s; } });
+  preview.addEventListener('play', () => { const [s, e] = range(); if (preview.currentTime < s - 0.05 || preview.currentTime >= e) preview.currentTime = s; });
+  preview.addEventListener('loadedmetadata', () => {
+    const d = Math.floor(preview.duration * 10) / 10;
+    trimBox.hidden = !(isFinite(d) && d > 1); // durée inconnue ou très courte : on garde les 8 premières secondes
+    if (trimBox.hidden) return;
+    startIn.max = endIn.max = d;
+    startIn.value = 0;
+    endIn.value = Math.min(d, MAX_CLIP);
+    syncTrim();
+  });
+
   input.addEventListener('change', () => {
     const f = input.files[0];
     picked.textContent = f ? `${f.name} · ${(f.size / 1048576).toFixed(1)} Mo` : 'Aucune vidéo choisie';
+    if (preview.src) URL.revokeObjectURL(preview.src);
+    preview.hidden = !f;
+    trimBox.hidden = true;
+    if (f) preview.src = URL.createObjectURL(f);
   });
+  const label = addOnly ? 'Envoyer la vidéo' : v ? 'Reposter avec une nouvelle vidéo' : 'Poster ma validation';
   const btn = h('button', { class: 'btn primary block', onclick: () => busy(btn, async () => {
     const file = input.files[0];
     if (!file && addOnly) return toast('Choisis une vidéo.', true);
-    if (file && file.size > MAX_VIDEO) return toast('Vidéo trop lourde (50 Mo max) : coupe-la un peu.', true);
     if (!file && !confirm('Valider sans vidéo ? Elle te sera demandée dans les notifications.')) return;
-    const path = file ? await uploadVideo(file, m.id) : null;
+    const path = file ? await uploadVideo(file, m.id, range(), p => (btn.textContent = `Compression… ${Math.round(p * 100)} %`)) : null;
     if (addOnly) {
       await q(sb.from('validations').update({ video_path: path }).eq('id', v.id));
     } else {
@@ -379,18 +534,42 @@ function uploadForm(m, v) {
     sheet.close();
     toast(addOnly ? 'Vidéo ajoutée 📹' : 'Move validé ! 🔥');
     route();
-  }) }, addOnly ? 'Envoyer la vidéo' : v ? 'Reposter avec une nouvelle vidéo' : 'Poster ma validation');
+  }).finally(() => (btn.textContent = label)) }, label);
   return h('div', { class: 'stack' },
     v?.invalid && h('p', { class: 'warnbox' }, 'Ce move a été dévalidé par la team. Reposte-le avec une meilleure vidéo.'),
     h('label', { class: 'drop' }, icon('video'), h('strong', {}, 'Choisir ou filmer une vidéo'), picked, input),
+    preview,
+    trimBox,
     btn,
     !addOnly && h('p', { class: 'hint' }, "Pas de vidéo sous la main ? Poste quand même, elle te sera demandée dans les notifications."));
 }
 
-async function uploadVideo(file, moveId) {
-  const ext = (file.name.split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp4';
-  const path = `${me.id}/${moveId}-${Date.now()}.${ext}`;
-  await q(sb.storage.from('videos').upload(path, file, { contentType: file.type || 'video/mp4' }));
+// coupe le passage et le réencode en 480p léger, directement sur le téléphone (rien n'est envoyé avant)
+async function compress(file, [start, end], onProgress) {
+  const mb = await import(MEDIABUNNY); // chargé seulement au moment de poster une vidéo
+  const output = new mb.Output({ format: new mb.Mp4OutputFormat(), target: new mb.BufferTarget() });
+  const conv = await mb.Conversion.init({
+    input: new mb.Input({ source: new mb.BlobSource(file), formats: mb.ALL_FORMATS }),
+    output,
+    trim: { start, end },
+    video: async t => {
+      const w = await t.getDisplayWidth(), hgt = await t.getDisplayHeight();
+      const side = Math.min(480, w, hgt) & ~1; // petit côté à 480 px (pair pour l'encodeur)
+      return { codec: 'avc', [w > hgt ? 'height' : 'width']: side, frameRate: 30, quality: new mb.Quality({ bitrate: 350_000 }) };
+    },
+    audio: { codec: 'aac', quality: new mb.Quality({ bitrate: 48_000 }) }, // son retiré si le téléphone ne sait pas l'encoder
+    showWarnings: false,
+  });
+  if (!conv.utilizedTracks.some(t => t.isVideoTrack())) throw new Error("Ton téléphone n'arrive pas à compresser cette vidéo : mets à jour ton navigateur.");
+  conv.onProgress = onProgress;
+  await conv.execute();
+  return new Blob([output.target.buffer], { type: 'video/mp4' });
+}
+
+async function uploadVideo(file, moveId, range, onProgress) {
+  const small = await compress(file, range, onProgress);
+  const path = `${me.id}/${moveId}-${Date.now()}.mp4`;
+  await q(sb.storage.from('videos').upload(path, small, { contentType: 'video/mp4' }));
   return path;
 }
 
@@ -442,7 +621,7 @@ function voteActions(v, myVote) {
 
 function reviewItem(r) {
   const [cls, verb] = { ok: ['ok', 'a validé'], ko: ['ko', "n'a pas validé"], comment: ['', 'a commenté'] }[r.kind];
-  return h('li', { class: 'review ' + cls }, avatar(r.reviewer_name), h('div', { class: 'grow' },
+  return h('li', { class: 'review ' + cls }, avatar(r.reviewer_name, r.reviewer_avatar), h('div', { class: 'grow' },
     h('p', {}, h('strong', {}, r.reviewer_id === me.id ? 'Toi' : r.reviewer_name), ' ' + verb, h('small', { class: 'muted' }, ' · ' + ago(r.created_at))),
     r.body && h('p', { class: 'body' }, r.body)));
 }

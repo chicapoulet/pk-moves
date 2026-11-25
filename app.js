@@ -52,7 +52,7 @@ function icon(name) {
 
 const pct = (done, total) => (total ? Math.round((done * 100) / total) : 0);
 // où ranger un move : à faire (pas posté, ou non valide) / en attente / validé (par au moins 1 autre, comme le classement)
-const stage = v => (!v || v.invalid ? 'todo' : v.ok_count ? 'done' : 'wait');
+const stage = v => (!v || v.invalid ? 'todo' : v.ok_count && !v.ko_count ? 'done' : 'wait'); // un refus passe avant les validations
 const isDone = id => stage(mine.get(id)) === 'done';
 const sortRank = rows => [...rows].sort((a, b) => b.done - a.done || a.username.localeCompare(b.username));
 
@@ -99,8 +99,8 @@ function ago(iso) {
 function status(v) {
   if (!v) return { key: 'todo', label: 'À faire', mark: '○' };
   if (v.invalid) return { key: 'ko', label: 'Non valide', mark: '✕' }; // 2 refus, jusqu'à ce qu'il soit reposté
+  if (v.ko_count) return { key: 'warn', label: 'Potentiellement refusé', mark: '!' }; // un refus passe avant les validations
   if (v.ok_count) return { key: 'ok', label: v.video_path ? 'Validé' : 'Validé sans vidéo', mark: '✓' };
-  if (v.ko_count) return { key: 'warn', label: 'Potentiellement refusé', mark: '!' };
   if (!v.video_path) return { key: 'warn', label: 'Sans vidéo', mark: '◐' };
   return { key: 'wait', label: 'En attente', mark: '◔' };
 }
@@ -370,8 +370,8 @@ const PAGE = 15;
 const POST_FILTERS = {
   all: r => r,
   wait: r => r.eq('ok_count', 0).eq('ko_count', 0),
-  ok: r => r.gt('ok_count', 0).eq('invalid', false),
-  ko: r => r.gt('ko_count', 0).or('invalid.eq.true,ok_count.eq.0'), // potentiellement refusé ou non valide
+  ok: r => r.gt('ok_count', 0).eq('ko_count', 0),
+  ko: r => r.gt('ko_count', 0), // potentiellement refusé ou non valide (un refus passe avant les validations)
 };
 async function postsView() {
   const feed = h('div', { class: 'feed' });

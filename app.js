@@ -50,7 +50,7 @@ function icon(name) {
 }
 
 const pct = (done, total) => (total ? Math.round((done * 100) / total) : 0);
-const isDone = id => mine.has(id) && !mine.get(id).invalid;
+const isDone = id => mine.has(id) && !mine.get(id).invalid && mine.get(id).ok_count > 0; // comme le classement : validé par au moins 1 autre
 const sortRank = rows => [...rows].sort((a, b) => b.done - a.done || a.username.localeCompare(b.username));
 
 async function q(request) {
@@ -97,6 +97,7 @@ function status(v) {
   if (!v) return { key: 'todo', label: 'À faire', mark: '○' };
   if (v.invalid) return { key: 'ko', label: 'Dévalidé', mark: '✕' };
   if (!v.video_path) return { key: 'warn', label: 'Sans vidéo', mark: '◐' };
+  if (!v.ok_count) return { key: 'wait', label: 'En attente', mark: '◔' };
   return { key: 'ok', label: 'Validé', mark: '✓' };
 }
 
@@ -292,7 +293,7 @@ async function home() {
   const done = moves.filter(m => isDone(m.id)).length;
   const p = pct(done, moves.length);
   const ranked = sortRank(lb);
-  const next = moves.filter(m => !isDone(m.id)).slice(0, 5);
+  const next = moves.filter(m => !mine.has(m.id) || mine.get(m.id).invalid).slice(0, 5); // pas encore postés
   const noVideo = [...mine.values()].filter(v => !v.video_path && !v.invalid).length;
   const toReview = recent.filter(v => !voted.has(v.id)).slice(0, 8);
   return [

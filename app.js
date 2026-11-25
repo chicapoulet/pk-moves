@@ -62,7 +62,7 @@ async function q(request) {
 function msg(e) {
   const m = e?.message || String(e);
   if (/Invalid login/i.test(m)) return 'Nom ou mot de passe incorrect.';
-  if (/already registered|Database error saving new user/i.test(m)) return 'Ce nom est déjà pris.';
+  if (/already (been )?registered|Database error (saving new|updating) user/i.test(m)) return 'Ce nom est déjà pris.';
   if (/Password should/i.test(m)) return 'Mot de passe : 6 caractères minimum.';
   if (/exceeded the maximum/i.test(m)) return 'Vidéo trop lourde : garde un passage plus court.';
   if (/unsupported or unrecognizable/i.test(m)) return 'Vidéo illisible : choisis-en une autre.';
@@ -386,30 +386,83 @@ async function userView(id) {
   return [h('a', { class: 'back', href: '#team' }, '← Team'),
     h('section', { class: 'hero card' }, avatar(p.username, p.avatar_path, 'big'), h('div', { class: 'grow' },
       h('h1', {}, p.username + (own ? ' (toi)' : '')), h('p', {}, `${p.done} / ${p.total} moves validés · ${pc}%`), bar(pc),
-      own && h('label', { class: 'btn small photo-btn' }, '📷 Changer ma photo',
-        h('input', { type: 'file', accept: 'image/*', class: 'file', onchange: e => busy(e.target.closest('label'), () => changeAvatar(e.target.files[0])) })))),
+      own && h('div', { class: 'own-actions' }, h('label', { class: 'btn small photo-btn' }, '📷 Changer ma photo',
+        h('input', { type: 'file', accept: 'image/*', class: 'file', onchange: e => {
+          const file = e.target.files[0];
+          e.target.value = ''; // pour pouvoir rechoisir la même photo
+          busy(e.target.closest('label'), () => adjustPhoto(file));
+        } })),
+        h('button', { class: 'btn small', onclick: changeName }, '✏️ Changer mon nom')))),
     section('Moves postés', vals.length ? list(vals.map(v => validationRow(v, false))) : empty("Rien de posté pour l'instant."))];
 }
 
-// recadre au centre en carré 256 px : petite image, rapide à charger partout
-async function squareJpeg(file, size = 256) {
-  const img = new Image();
-  img.src = URL.createObjectURL(file);
-  try { await img.decode(); } catch { throw new Error('Image illisible, essaie une autre photo.'); }
-  finally { URL.revokeObjectURL(img.src); }
-  const side = Math.min(img.naturalWidth, img.naturalHeight);
-  const c = Object.assign(document.createElement('canvas'), { width: size, height: size });
-  c.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
-  return new Promise(ok => c.toBlob(ok, 'image/jpeg', 0.85));
+// le nom sert aussi à se connecter : on change les deux d'un coup (la base recopie le nom dans le profil)
+function changeName() {
+  const save = e => {
+    e.preventDefault();
+    busy(e.submitter, async () => {
+      const name = e.target.username.value.trim(), email = nameEmail(name);
+      if (!email) throw new Error('Ton nom doit contenir au moins 2 lettres ou chiffres.');
+      await q(sb.auth.updateUser({ email, data: { username: name } }));
+      me.username = name;
+      sheet.close();
+      toast(`C'est fait ! Connecte-toi maintenant avec « ${name} » 👌`);
+      route();
+    });
+  };
+  openSheet('Changer mon nom', h('form', { class: 'stack', onsubmit: save },
+    h('label', { class: 'field' }, h('span', {}, 'Nouveau nom'),
+      h('input', { name: 'username', value: me.username, required: true, minlength: 2, maxlength: 24, autocomplete: 'username', autocapitalize: 'off' })),
+    h('p', { class: 'hint' }, 'Tu te connecteras avec ce nouveau nom (même mot de passe).'),
+    h('button', { class: 'btn primary block', type: 'submit' }, 'Enregistrer')));
 }
 
-async function changeAvatar(file) {
+// la photo s'ouvre dans un cadre rond : on la glisse et on zoome, puis on garde ce carré en 256 px (petit, rapide à charger)
+async function adjustPhoto(file) {
   if (!file) return;
+  const img = new Image(); // <img> applique la rotation des photos de téléphone
+  img.src = URL.createObjectURL(file);
+  await img.decode().catch(() => { URL.revokeObjectURL(img.src); throw new Error('Image illisible, essaie une autre photo.'); });
+  const W = img.naturalWidth, H = img.naturalHeight;
+  const clamp = (x, lo, hi) => Math.min(Math.max(x, lo), hi);
+  let zoom = 1, cx = W / 2, cy = H / 2, drag = null; // centre du cadre, en pixels de la photo
+  const side = () => Math.min(W, H) / zoom;
+  const draw = c => {
+    const s = side();
+    cx = clamp(cx, s / 2, W - s / 2); cy = clamp(cy, s / 2, H - s / 2); // le cadre reste plein
+    c.getContext('2d').drawImage(img, cx - s / 2, cy - s / 2, s, s, 0, 0, c.width, c.height);
+  };
+  const move = (dx, dy) => { const k = side() / view.clientWidth; cx -= dx * k; cy -= dy * k; draw(view); };
+  const view = h('canvas', { class: 'crop', width: 512, height: 512, tabindex: 0, 'aria-label': 'Aperçu : glisse la photo (ou flèches du clavier) pour la placer',
+    onpointerdown: e => { if (!e.isPrimary) return; drag = [e.clientX, e.clientY]; view.setPointerCapture(e.pointerId); },
+    onpointermove: e => { if (drag && e.isPrimary) { move(e.clientX - drag[0], e.clientY - drag[1]); drag = [e.clientX, e.clientY]; } },
+    onpointerup: () => (drag = null), onpointercancel: () => (drag = null),
+    onkeydown: e => {
+      const d = { ArrowLeft: [-10, 0], ArrowRight: [10, 0], ArrowUp: [0, -10], ArrowDown: [0, 10] }[e.key];
+      if (d) { e.preventDefault(); move(...d); }
+    } });
+  const save = h('button', { class: 'btn primary block', onclick: () => busy(save, async () => {
+    const out = Object.assign(document.createElement('canvas'), { width: 256, height: 256 });
+    draw(out);
+    await changeAvatar(await new Promise(ok => out.toBlob(ok, 'image/jpeg', 0.85)));
+  }) }, 'Enregistrer');
+  openSheet('Ajuste ta photo', h('div', { class: 'stack' },
+    view,
+    h('p', { class: 'hint' }, '👆 Glisse la photo pour la placer dans le rond.'),
+    h('label', { class: 'zoom' }, '🔍', h('input', { type: 'range', min: 1, max: 3, step: 0.01, value: 1, 'aria-label': 'Zoom',
+      oninput: e => { zoom = +e.target.value; draw(view); } })),
+    save));
+  sheet.addEventListener('close', () => URL.revokeObjectURL(img.src), { once: true }); // libère la photo
+  draw(view);
+}
+
+async function changeAvatar(blob) {
   const path = `${me.id}/${Date.now()}.jpg`;
-  await q(sb.storage.from('avatars').upload(path, await squareJpeg(file), { contentType: 'image/jpeg' }));
+  await q(sb.storage.from('avatars').upload(path, blob, { contentType: 'image/jpeg' }));
   await q(sb.from('profiles').update({ avatar_path: path }).eq('id', me.id));
   if (me.avatar_path) sb.storage.from('avatars').remove([me.avatar_path]); // l'ancienne photo
   me.avatar_path = path;
+  sheet.close();
   toast('Photo de profil changée 👌');
   route();
 }
@@ -474,44 +527,47 @@ function uploadForm(m, v) {
   const input = h('input', { type: 'file', accept: 'video/*', class: 'file' });
   const picked = h('small', { class: 'muted' }, 'Aucune vidéo choisie');
 
-  // découpe : on règle le début et la fin du passage à garder sur l'aperçu
-  const preview = h('video', { class: 'video', playsinline: true, controls: true, muted: true, hidden: true });
+  // découpe : on choisit le début puis la durée. Pendant qu'on glisse, l'aperçu montre l'image en direct ;
+  // quand on relâche, il rejoue le passage gardé en boucle (= le rendu final)
+  const preview = h('video', { class: 'video', playsinline: true, muted: true, hidden: true });
   const startIn = h('input', { type: 'range', min: 0, step: 0.1, value: 0, 'aria-label': 'Début du passage' });
-  const endIn = h('input', { type: 'range', min: 0, step: 0.1, value: 0, 'aria-label': 'Fin du passage' });
-  const startLbl = h('b', {}), endLbl = h('b', {});
+  const lenIn = h('input', { type: 'range', min: 0.5, step: 0.1, value: MAX_CLIP, 'aria-label': 'Durée du passage' });
+  const sel = h('span', {}), summary = h('b', {});
   const trimBox = h('div', { class: 'trim', hidden: true },
-    h('p', { class: 'hint' }, `✂️ Garde seulement le passage du move (${MAX_CLIP} s max)`),
-    h('label', { class: 'trim-row' }, h('span', {}, 'Début'), startIn, startLbl),
-    h('label', { class: 'trim-row' }, h('span', {}, 'Fin'), endIn, endLbl));
+    h('p', { class: 'hint' }, `✂️ Place le début du move, puis règle sa durée (${MAX_CLIP} s max). L'aperçu rejoue ton passage en boucle.`),
+    h('div', { class: 'trim-bar' }, sel),
+    h('label', { class: 'trim-row' }, h('span', {}, 'Début'), startIn),
+    h('label', { class: 'trim-row' }, h('span', {}, 'Durée'), lenIn),
+    summary);
   const fmt = s => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;
-  const clamp = (x, lo, hi) => Math.min(Math.max(x, lo), hi);
-  const syncTrim = moved => {
-    // passage de 0,5 s à MAX_CLIP s : on pousse l'autre curseur si besoin
-    if (moved === startIn) {
-      startIn.value = Math.min(+startIn.value, +startIn.max - 0.5);
-      endIn.value = clamp(+endIn.value, +startIn.value + 0.5, +startIn.value + MAX_CLIP);
-    } else if (moved === endIn) {
-      endIn.value = Math.max(+endIn.value, 0.5);
-      startIn.value = clamp(+startIn.value, +endIn.value - MAX_CLIP, +endIn.value - 0.5);
-    }
-    startLbl.textContent = fmt(+startIn.value);
-    endLbl.textContent = fmt(+endIn.value);
-    preview.currentTime = moved === endIn ? +endIn.value : +startIn.value;
+  const range = () => trimBox.hidden ? [0, MAX_CLIP] : [+startIn.value, Math.min(+startIn.value + +lenIn.value, preview.duration)];
+  let pending = null; // une seule recherche d'image à la fois : le glissé reste fluide sur téléphone
+  preview.addEventListener('seeked', () => { if (pending != null) { preview.currentTime = pending; pending = null; } });
+  const scrub = t => {
+    const [s, e] = range(), d = preview.duration;
+    summary.textContent = `${fmt(s)} → ${fmt(e)} · ${(e - s).toFixed(1)} s gardées`;
+    sel.style.left = `${s / d * 100}%`; sel.style.width = `${(e - s) / d * 100}%`;
+    preview.pause();
+    if (preview.seeking) pending = t; else preview.currentTime = t;
   };
-  startIn.addEventListener('input', () => syncTrim(startIn));
-  endIn.addEventListener('input', () => syncTrim(endIn));
-  const range = () => trimBox.hidden ? [0, MAX_CLIP] : [+startIn.value, +endIn.value];
-  // l'aperçu ne rejoue que le passage choisi
-  preview.addEventListener('timeupdate', () => { const [s, e] = range(); if (preview.currentTime >= e) { preview.pause(); preview.currentTime = s; } });
-  preview.addEventListener('play', () => { const [s, e] = range(); if (preview.currentTime < s - 0.05 || preview.currentTime >= e) preview.currentTime = s; });
+  const loop = () => { pending = null; preview.currentTime = range()[0]; preview.play().catch(() => {}); };
+  startIn.addEventListener('input', () => scrub(range()[0])); // on voit l'image du début
+  lenIn.addEventListener('input', () => scrub(range()[1]));   // on voit l'image de fin
+  startIn.addEventListener('change', loop);
+  lenIn.addEventListener('change', loop);
+  preview.addEventListener('timeupdate', () => { if (!preview.paused && preview.currentTime >= range()[1]) loop(); });
+  preview.addEventListener('ended', loop);
   preview.addEventListener('loadedmetadata', () => {
-    const d = Math.floor(preview.duration * 10) / 10;
+    const d = preview.duration;
     trimBox.hidden = !(isFinite(d) && d > 1); // durée inconnue ou très courte : on garde les 8 premières secondes
-    if (trimBox.hidden) return;
-    startIn.max = endIn.max = d;
-    startIn.value = 0;
-    endIn.value = Math.min(d, MAX_CLIP);
-    syncTrim();
+    if (!trimBox.hidden) {
+      startIn.max = d - 0.5;
+      lenIn.max = Math.min(d, MAX_CLIP);
+      startIn.value = 0;
+      lenIn.value = lenIn.max;
+      scrub(0);
+    }
+    loop();
   });
 
   input.addEventListener('change', () => {
@@ -653,9 +709,9 @@ async function refreshBadge() {
   const badge = document.getElementById('badge');
   if (!badge) return;
   try {
-    const { reviews, noVideo } = await fetchNotifs();
+    const { reviews, noVideo, invalid } = await fetchNotifs();
     const seen = localStorage.getItem(SEEN_KEY) || '';
-    const n = noVideo.length + reviews.filter(r => r.created_at > seen).length;
+    const n = noVideo.length + invalid.length + reviews.filter(r => r.created_at > seen).length;
     badge.textContent = n > 9 ? '9+' : n;
     badge.hidden = !n;
   } catch { /* le badge n'est pas vital */ }

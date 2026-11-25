@@ -157,7 +157,13 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent); }
 
 img.avatar { object-fit: cover; }
 .avatar.big { width: 84px; height: 84px; font-size: 2rem; }
-.photo-btn { align-self: flex-start; margin-top: 8px; cursor: pointer; }
+.own-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.photo-btn { cursor: pointer; }
+.crop { display: block; width: min(260px, 100%); aspect-ratio: 1; margin: 0 auto; border-radius: 50%; background: var(--surface-2); touch-action: none; cursor: grab; }
+.crop:active { cursor: grabbing; }
+.crop:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.zoom { display: flex; align-items: center; gap: 10px; }
+.zoom input { flex: 1; accent-color: var(--accent); }
 
 .install {
   display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; cursor: pointer;
@@ -175,9 +181,11 @@ img.avatar { object-fit: cover; }
 
 .trim { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 12px; background: var(--surface); }
 .trim .hint { text-align: left; }
-.trim-row { display: grid; grid-template-columns: 44px 1fr 52px; align-items: center; gap: 10px; font-size: .85rem; color: var(--muted); }
-.trim-row b { color: var(--text); font-variant-numeric: tabular-nums; text-align: right; }
-.trim-row input { padding: 0; accent-color: var(--accent); }
+.trim-row { display: grid; grid-template-columns: 48px 1fr; align-items: center; gap: 10px; font-size: .85rem; color: var(--muted); }
+.trim-row input { padding: 0; height: 32px; accent-color: var(--accent); }
+.trim-bar { position: relative; height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+.trim-bar span { position: absolute; top: 0; bottom: 0; border-radius: 4px; background: var(--accent); }
+.trim > b { font-size: .85rem; text-align: center; font-variant-numeric: tabular-nums; }
 
 .feed { display: flex; flex-direction: column; gap: 14px; }
 .post { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }

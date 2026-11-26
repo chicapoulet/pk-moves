@@ -2,7 +2,7 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
-// vidéo coupée à 8 s max et réencodée en 720p (≈ 1,5 Mo)
+// vidéo coupée à 8 s max et réencodée en 480p (≈ 0,4 Mo) : le stockage et le téléchargement gratuits tiennent
 const MAX_CLIP = 8;
 const MEDIABUNNY = 'https://cdn.jsdelivr.net/npm/mediabunny@1.66.4/dist/bundles/mediabunny.min.mjs';
 const seenKey = () => (dark ? 'pk-seen-dark' : 'pk-seen'); // dernier avis vu dans la cloche, une par compétition
@@ -84,7 +84,7 @@ function msg(e) {
   if (/Failed to fetch|NetworkError|Load failed/i.test(m)) return 'Pas de connexion au serveur.';
   if (/move_ballots_pkey/.test(m)) return 'Tu as déjà voté.';
   if (/row-level security policy for table "move_ballots"/.test(m)) return 'Ce vote est déjà terminé.';
-  if (/row-level security policy for table "move_votes"/.test(m)) return 'Vote impossible : place hors de la liste, ou à plus de 10 places de celle proposée.';
+  if (/row-level security policy for table "move_votes"/.test(m)) return 'Vote impossible : place hors de la liste, à plus de 10 places de celle proposée, ou vote déjà terminé.';
   return m;
 }
 
@@ -440,7 +440,7 @@ async function whileAway() {
   if (!me?.username || !since) return markSeen(); // 1re visite : rien à raconter
   const [revs, votes] = await Promise.all([
     q(sb.from('v_reviews').select('validation_id').eq('owner_id', me.id).neq('kind', 'comment').gt('created_at', since)),
-    q(sb.from('move_votes').select('move_id,status,new_position,demo_path').neq('status', 'open').gt('decided_at', since)),
+    q(sb.from('move_votes').select('move_id,status,new_position,demo_path').in('status', ['passed', 'refused']).gt('decided_at', since)),
   ]).catch(() => [[], []]); // pas de réseau : on réessaiera au prochain retour
   const ids = [...new Set(revs.map(r => r.validation_id))];
   const mineNow = ids.length ? await q(sb.from('v_validations').select('*').in('id', ids)).catch(() => []) : [];
@@ -544,26 +544,35 @@ function postCard(v, url, myVote, after) {
 }
 
 // ───────────── Vote : changer la place d'un move ou sa vidéo démo (4 pour = adopté, 2 contre = refusé) ─────────────
-const VOTE_STATUS = { open: { key: 'wait', label: 'En cours', mark: '◔' }, passed: { key: 'ok', label: 'Adopté', mark: '✓' }, refused: { key: 'ko', label: 'Refusé', mark: '✕' } };
+const VOTE_STATUS = { open: { key: 'wait', label: 'En cours', mark: '◔' }, passed: { key: 'ok', label: 'Adopté', mark: '✓' }, refused: { key: 'ko', label: 'Refusé', mark: '✕' },
+  replaced: { key: 'warn', label: 'Remplacé', mark: '↪' } }; // une autre place de la même famille est passée
 
 async function votesView() {
   // shortcut: les 50 derniers votes de chaque onglet ; ajouter « Voir plus » si l'historique devient long
   const rows = await q(sb.from('move_votes').select('*, profiles!move_votes_user_id_fkey(username,avatar_path), move_ballots(user_id,ok)')
-    .eq('status', voteFilter).order('created_at', { ascending: false }).limit(50));
+    .in('status', voteFilter === 'refused' ? ['refused', 'replaced'] : [voteFilter]).order('created_at', { ascending: false }).limit(50));
   const urls = await signedUrls(rows.map(v => v.demo_path).filter(Boolean));
   return [h('h1', { class: 'page-title' }, 'Vote'),
     h('p', { class: 'muted sub' }, 'Change la place d’un move dans la liste ou sa vidéo démo · 4 pour = adopté, 2 contre = refusé'),
     h('button', { class: 'btn primary block', onclick: () => newVote() }, '＋ Lancer un vote'),
     segmented('Filtrer les votes', [['open', 'En cours'], ['passed', 'Validés'], ['refused', 'Refusés']], voteFilter, k => { voteFilter = k; route(); }),
-    rows.length ? h('div', { class: 'feed' }, rows.map(v => voteCard(v, urls.get(v.demo_path))))
+    rows.length ? h('div', { class: 'feed' }, rows.map(v => voteCard(v, urls.get(v.demo_path), rows)))
       : empty({ open: 'Aucun vote en cours. Lance le premier !', passed: 'Aucun vote adopté pour l’instant.', refused: 'Aucun vote refusé.' }[voteFilter])];
 }
 
-function voteCard(v, url) {
+function voteCard(v, url, rows) {
   const m = moves.find(x => x.id === v.move_id) ?? { id: v.move_id, name: 'Move retiré', position: '?' };
   const who = v.profiles?.username ?? '?', own = v.user_id === me.id;
   const yes = v.move_ballots.filter(b => b.ok).length, no = v.move_ballots.length - yes;
   const myBallot = v.move_ballots.find(b => b.user_id === me.id);
+  // contre-proposition sur mon vote en cours : je peux l'accepter (shortcut: le vote d'origine doit être dans les 50 affichés)
+  const parent = v.status === 'open' && v.parent_id && rows.find(r => r.id === v.parent_id && r.status === 'open');
+  const accept = btn => busy(btn, async () => {
+    if (!confirm(`Accepter ${m.name} n° ${v.new_position} ? Elle passe tout de suite à la place de ton vote (n° ${parent.new_position}).`)) return;
+    await q(sb.rpc('accept_counter', { counter_id: v.id }));
+    route();
+    popup('🎉', 'Contre-proposition adoptée !', `${m.name} passe n° ${v.new_position} dans la liste de tout le monde.`);
+  });
   const ballot = (btn, ok) => busy(btn, async () => {
     btn.parentElement.querySelectorAll('button').forEach(b => (b.disabled = true)); // pas de « Pour » puis « Contre » d'affilée
     try { await q(sb.from('move_ballots').insert({ vote_id: v.id, ok })); } catch (e) { route(); throw e; } // vote fini entre-temps : la carte se met à jour
@@ -589,7 +598,9 @@ function voteCard(v, url) {
       h('div', { class: 'vote' },
         h('button', { class: 'btn ok', onclick: e => ballot(e.currentTarget, true) }, '✓ Pour'),
         h('button', { class: 'btn ko', onclick: e => ballot(e.currentTarget, false) }, '✕ Contre')),
-      !v.demo_path && h('button', { class: 'btn ghost block', onclick: () => counterVote(v, m) }, '↕️ Proposer une autre place')),
+      !v.demo_path && !v.parent_id && h('button', { class: 'btn ghost block', onclick: () => counterVote(v, m) }, '↕️ Proposer une autre place')),
+    parent?.user_id === me.id && h('div', { class: 'quick' },
+      h('button', { class: 'btn primary block', onclick: e => accept(e.currentTarget) }, '✓ J’accepte cette place (elle remplace mon vote)')),
     v.status === 'refused' && h('div', { class: 'quick' }, h('button', { class: 'btn block', onclick: () => newVote(v) },
       '↻ Reproposer')));
 }
@@ -647,14 +658,14 @@ function counterVote(v, m) {
       if (p === v.new_position) throw new Error('Choisis une autre place que celle proposée.');
       await q(sb.from('move_votes').insert({ move_id: v.move_id, new_position: p, parent_id: v.id, reason: e.target.reason.value.trim() }));
       route();
-      popup('🗳️', 'Contre-proposition lancée !', `${m.name} n° ${p} : la team vote à part. 4 pour = adopté, 2 contre = refusé.`);
+      popup('🗳️', 'Contre-proposition lancée !', `${m.name} n° ${p} : la team vote à part. La 1re des deux à 4 pour passe, ou le créateur du vote l’accepte.`);
     });
   };
   openSheet(`Autre place : ${m.name}`, h('form', { class: 'stack', onsubmit: save },
     h('p', { class: 'muted' }, `Proposé : n° ${v.new_position} (aujourd'hui n° ${m.position}). Tu peux proposer de n° ${lo} à n° ${hi}.`),
     h('label', { class: 'field' }, h('span', {}, 'Ta place (n°)'), h('input', { name: 'pos', type: 'number', min: lo, max: hi, required: true, inputmode: 'numeric' })),
     h('label', { class: 'field' }, h('span', {}, 'Pourquoi ? (facultatif)'), h('textarea', { name: 'reason', rows: 2, maxlength: 500 })),
-    h('p', { class: 'hint' }, 'Elle est votée à part, comme un nouveau vote.'),
+    h('p', { class: 'hint' }, 'Votée à part : la 1re des deux à avoir 4 pour passe et l’autre est remplacée. Le créateur du vote peut aussi l’accepter.'),
     h('button', { class: 'btn primary block', type: 'submit' }, 'Lancer la contre-proposition')));
 }
 
@@ -1032,7 +1043,7 @@ function uploadForm(m, v) {
     !addOnly && h('p', { class: 'hint' }, "Pas de vidéo sous la main ? Poste quand même, elle te sera demandée dans les notifications."));
 }
 
-// coupe le passage et le réencode en 720p, directement sur le téléphone (rien n'est envoyé avant)
+// coupe le passage et le réencode en 480p, directement sur le téléphone (rien n'est envoyé avant)
 async function compress(file, [start, end], onProgress) {
   const mb = await import(MEDIABUNNY); // chargé seulement au moment de poster une vidéo
   const output = new mb.Output({ format: new mb.Mp4OutputFormat(), target: new mb.BufferTarget() });
@@ -1042,8 +1053,8 @@ async function compress(file, [start, end], onProgress) {
     trim: { start, end },
     video: async t => {
       const w = await t.getDisplayWidth(), hgt = await t.getDisplayHeight();
-      const side = Math.min(720, w, hgt) & ~1; // petit côté à 720 px (pair pour l'encodeur)
-      return { codec: 'avc', [w > hgt ? 'height' : 'width']: side, frameRate: 30, quality: new mb.Quality({ bitrate: 1_500_000 }) };
+      const side = Math.min(480, w, hgt) & ~1; // petit côté à 480 px (pair pour l'encodeur)
+      return { codec: 'avc', [w > hgt ? 'height' : 'width']: side, frameRate: 30, quality: new mb.Quality({ bitrate: 350_000 }) };
     },
     audio: { codec: 'aac', quality: new mb.Quality({ bitrate: 48_000 }) }, // son retiré si le téléphone ne sait pas l'encoder
     showWarnings: false,

@@ -1,21 +1,32 @@
-import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.2/+esm'; // version figée : une mise à jour piégée ne passe pas toute seule
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
-// vidéo coupée à 8 s max et réencodée en 480p (≈ 400 Ko) : 210 moves × 10 comptes tiennent dans le 1 Go gratuit
+// vidéo coupée à 8 s max et réencodée en 720p (≈ 1,5 Mo)
 const MAX_CLIP = 8;
 const MEDIABUNNY = 'https://cdn.jsdelivr.net/npm/mediabunny@1.66.4/dist/bundles/mediabunny.min.mjs';
-const SEEN_KEY = 'pk-seen';
+const seenKey = () => (dark ? 'pk-seen-dark' : 'pk-seen'); // dernier avis vu dans la cloche, une par compétition
 const app = document.getElementById('app');
 const sheet = document.getElementById('sheet');
 const toastEl = document.getElementById('toast');
 
 let me = null;        // { id, username }
-let moves = [];       // [{ id, name }] dans l'ordre de la liste
+let moves = [];       // [{ id, name, position, points, demo_path }] dans l'ordre de la liste
 let mine = new Map(); // move_id -> ma ligne v_validations
+let hidden = new Set(); // id des moves que j'ai cachés de ma liste
 let routeToken = 0;
 let filter = 'all', search = ''; // gardés entre deux affichages de "Mes moves" (et des profils)
 let postFilter = 'all';          // pareil pour "Posts"
+let voteFilter = 'open';         // pareil pour "Vote"
+// mode dark = la 2e compétition, sur béton (l'app passe en rouge) : mêmes moves, mais posts, avis et classement à part.
+// Gardé sur ce téléphone.
+let dark = localStorage.getItem('pk-dark') === '1';
+function applyDark() {
+  document.documentElement.classList.toggle('dark', dark);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#120b0d' : '#0d0f14');
+}
+applyDark();
+const comp = () => (dark ? 'Compétition dark · sur béton' : 'Compétition normale · en salle');
 
 // ───────────── Outils ─────────────
 function h(tag, props = {}, ...kids) {
@@ -31,10 +42,11 @@ function h(tag, props = {}, ...kids) {
 
 const ICONS = {
   home: '<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
-  chat: '<path d="M4 4.5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9.5L5 20v-3.5H4a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1z"/>',
+  vote: '<path d="M4 13h16v7a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1zM7 13V4h10v9M9.5 8.5l2 2 3.5-4"/>',
   trophy: '<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0zM7 6H4a3 3 0 0 0 3 4M17 6h3a3 3 0 0 1-3 4"/>',
   list: '<path d="M10 6h10M10 12h10M10 18h10M3.5 6l1.2 1.2L7 5M3.5 12l1.2 1.2L7 11M3.5 18l1.2 1.2L7 17"/>',
   bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 8 3 8H3s3-1 3-8M10 20a2 2 0 0 0 4 0"/>',
+  moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>',
   logout: '<path d="M15 4h4a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-4M10 17l-5-5 5-5M5 12h11"/>',
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   video: '<rect x="2.5" y="6" width="13" height="12" rx="2"/><path d="m15.5 10.5 6-3.5v10l-6-3.5"/>',
@@ -70,6 +82,9 @@ function msg(e) {
   if (/exceeded the maximum/i.test(m)) return 'Vidéo trop lourde : garde un passage plus court.';
   if (/unsupported or unrecognizable/i.test(m)) return 'Vidéo illisible : choisis-en une autre.';
   if (/Failed to fetch|NetworkError|Load failed/i.test(m)) return 'Pas de connexion au serveur.';
+  if (/move_ballots_pkey/.test(m)) return 'Tu as déjà voté.';
+  if (/row-level security policy for table "move_ballots"/.test(m)) return 'Ce vote est déjà terminé.';
+  if (/row-level security policy for table "move_votes"/.test(m)) return 'Vote impossible : place hors de la liste, ou à plus de 10 places de celle proposée.';
   return m;
 }
 
@@ -105,6 +120,23 @@ function status(v) {
   return { key: 'wait', label: 'En attente', mark: '◔' };
 }
 
+const fmtPoints = p => (p == null ? 'Points : inconnue' : `${(+p).toLocaleString('fr')} point${p >= 2 ? 's' : ''}`);
+const MOVE_COLS = 'id,name,position,points,demo_path';
+// liens des vidéos du bucket privé, par chemin. Le même lien est resservi 6 jours (il est valable 7) :
+// le téléphone garde la vidéo en cache au lieu de la retélécharger, ce qui économise la bande passante gratuite (5 Go/mois)
+const URLS = 'pk-urls', DAY = 86400000;
+const urlCache = JSON.parse(localStorage.getItem(URLS) || '{}');
+async function signedUrls(paths) {
+  const now = Date.now(), missing = [...new Set(paths)].filter(p => !(urlCache[p]?.until > now));
+  if (missing.length) {
+    const fresh = await q(sb.storage.from('videos').createSignedUrls(missing, 7 * DAY / 1000));
+    fresh.forEach(s => s.signedUrl && (urlCache[s.path] = { url: s.signedUrl, until: now + 6 * DAY }));
+    for (const p in urlCache) if (!(urlCache[p].until > now)) delete urlCache[p]; // la liste ne grossit pas sans fin
+    try { localStorage.setItem(URLS, JSON.stringify(urlCache)); } catch { /* stockage plein : le cache reste en mémoire */ }
+  }
+  return new Map(paths.map(p => [p, urlCache[p]?.url]));
+}
+
 // ───────────── Petits blocs d'interface ─────────────
 const chip = s => h('span', { class: 'chip ' + s.key }, s.mark + ' ' + s.label);
 const ring = p => h('div', { class: 'ring', style: `--p:${p}`, role: 'img', 'aria-label': `${p} % validé` }, h('b', {}, p + '%'));
@@ -118,14 +150,30 @@ function avatar(name = '?', path = null, cls = '') {
   return h('span', { class: 'avatar ' + cls, style: `--h:${hue}`, 'aria-hidden': 'true' }, name[0].toUpperCase());
 }
 
-// #t=0.1 : montre la 1re image sur iPhone
-const videoEl = url => h('video', { src: url + '#t=0.1', controls: true, playsinline: true, preload: 'metadata', class: 'video' });
-const errorState = e => h('div', { class: 'error', role: 'alert' }, h('p', {}, msg(e)), h('button', { class: 'btn', onclick: route }, 'Réessayer'));
+// vidéos : lecture auto en boucle, sans son ni boutons ; on touche pour mettre en pause ou relancer.
+// Elle ne joue que quand on la voit (fil Posts) ; une vidéo mise en pause le reste.
+const onScreen = new IntersectionObserver(entries => entries.forEach(({ target: v, isIntersecting }) => {
+  if (!v.isConnected) return onScreen.unobserve(v); // fenêtre fermée ou page changée
+  isIntersecting && !v.dataset.paused ? v.play().catch(() => {}) : v.pause();
+}), { threshold: 0.6 });
+function videoEl(url) {
+  const toggle = () => {
+    if (v.paused) { delete v.dataset.paused; v.play().catch(() => {}); } else { v.dataset.paused = '1'; v.pause(); }
+  };
+  // #t=0.1 : montre la 1re image sur iPhone tant qu'elle ne joue pas
+  const v = h('video', { src: url + '#t=0.1', muted: true, loop: true, playsinline: true, preload: 'metadata', class: 'video', tabindex: 0,
+    'aria-label': 'Vidéo : touche pour mettre en pause ou relancer', onclick: toggle,
+    onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } } });
+  v.muted = true; // l'attribut seul ne coupe pas le son : sans ça, le téléphone bloque la lecture auto
+  onScreen.observe(v);
+  return v;
+}
+const errorState = (e, retry = route) => h('div', { class: 'error', role: 'alert' }, h('p', {}, msg(e)), h('button', { class: 'btn', onclick: () => retry() }, 'Réessayer'));
 const skeleton = () => h('div', { 'aria-busy': 'true', 'aria-label': 'Chargement' }, [1, 2, 3, 4, 5].map(() => h('div', { class: 'skel' })));
 
 function segmented(label, options, current, onPick) {
   const el = h('div', { class: 'seg', role: 'group', 'aria-label': label },
-    options.map(([k, text]) => h('button', { 'aria-pressed': String(current === k), onclick: e => {
+    options.map(([k, text]) => h('button', { type: 'button', 'aria-pressed': String(current === k), onclick: e => {
       el.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b === e.currentTarget)));
       onPick(k);
     } }, text)));
@@ -135,7 +183,7 @@ function segmented(label, options, current, onPick) {
 function moveRow(m, map = mine, onOpen = openMove) {
   const v = map.get(m.id);
   return h('li', {}, h('button', { class: 'row', onclick: () => onOpen(m, v) },
-    h('span', { class: 'num' }, m.id),
+    h('span', { class: 'num' }, m.position),
     h('span', { class: 'grow' }, m.name),
     v && chip(status(v))));
 }
@@ -206,14 +254,10 @@ sb.auth.onAuthStateChange((_event, session) => {
 async function start(user) {
   me = { id: user.id };
   try {
-    const [profile, list] = await Promise.all([
-      q(sb.from('profiles').select('username,avatar_path,is_admin').eq('id', user.id).single()),
-      q(sb.from('moves').select('id,name').order('id')),
-    ]);
-    Object.assign(me, profile);
-    moves = list;
+    Object.assign(me, await q(sb.from('profiles').select('username,avatar_path,is_admin').eq('id', user.id).single()));
+    const deepLink = /^#(v\/|notifs)/.test(location.hash); // ouvert depuis une notif : elle montre déjà le principal
     shell();
-    route();
+    route().then(() => deepLink || whileAway());
     maybeInstallTuto();
     syncPush();
   } catch (e) {
@@ -225,18 +269,38 @@ async function start(user) {
 }
 
 // ───────────── Squelette + navigation ─────────────
-const TABS = [['home', 'Accueil', 'home'], ['posts', 'Posts', 'play'], ['chat', 'Chat', 'chat'], ['rank', 'Classement', 'trophy'], ['moves', 'Mes moves', 'list']];
+const TABS = [['home', 'Accueil', 'home'], ['posts', 'Posts', 'play'], ['vote', 'Vote', 'vote'], ['rank', 'Classement', 'trophy'], ['moves', 'Mes moves', 'list']];
 
 function shell() {
   app.replaceChildren(
     h('header', { class: 'top' },
-      h('a', { class: 'brand small', href: '#home' }, h('span', { class: 'logo', 'aria-hidden': 'true' }, 'PK'), 'PK Moves'),
+      h('a', { class: 'brand small', href: '#home' }, h('span', { class: 'logo', 'aria-hidden': 'true' }, 'PK'), 'PK Moves', h('span', { class: 'mode' }, 'DARK')), // visible en mode dark (CSS)
       h('div', { class: 'top-actions' },
+        h('button', { class: 'icon-btn dark-btn', 'aria-pressed': String(dark), 'aria-label': 'Mode dark : compétition sur béton', onclick: toggleDark }, icon('moon')),
         h('button', { class: 'icon-btn', 'aria-label': 'Notifications', onclick: openNotifs }, icon('bell'), h('span', { class: 'badge', id: 'badge', hidden: true })),
         h('button', { class: 'icon-btn', 'aria-label': 'Se déconnecter', onclick: () => confirm('Se déconnecter ?') && logout() }, icon('logout')))),
     h('main', { id: 'view', class: 'view' }),
     h('nav', { class: 'tabs', 'aria-label': 'Navigation principale' },
       TABS.map(([id, label, ic]) => h('a', { href: '#' + id, 'data-tab': id }, icon(ic), h('span', {}, label)))));
+}
+
+function toggleDark(e) {
+  const flip = () => {
+    dark = !dark;
+    localStorage.setItem('pk-dark', dark ? '1' : '');
+    applyDark();
+    document.querySelector('.dark-btn').setAttribute('aria-pressed', String(dark));
+    route();
+    toast(dark ? 'Mode dark : la compétition sur béton 🔴' : 'Mode normal : la compétition en salle');
+  };
+  if (calm.matches) return flip();
+  if (!document.startViewTransition) return flip(), app.animate({ opacity: [0.4, 1] }, 300);
+  // le nouveau thème s'ouvre en cercle depuis le bouton lune
+  const r = e.currentTarget.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+  const end = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
+  document.startViewTransition(flip).ready.then(() => document.documentElement.animate(
+    { clipPath: [`circle(0 at ${x}px ${y}px)`, `circle(${end}px at ${x}px ${y}px)`] },
+    { duration: 450, easing: 'cubic-bezier(.4,0,.2,1)', pseudoElement: '::view-transition-new(root)' })).catch(() => {});
 }
 
 window.addEventListener('hashchange', () => { window.scrollTo(0, 0); me?.username && route(); });
@@ -300,6 +364,8 @@ function syncPush() {
 async function logout() {
   const sub = pushOk && await pushSub().catch(() => null);
   if (sub) await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
+  localStorage.removeItem(URLS); // les liens des vidéos ne restent pas sur le téléphone
+  for (const p in urlCache) delete urlCache[p];
   sb.auth.signOut();
 }
 
@@ -326,28 +392,82 @@ async function route() {
     a.dataset.tab === (tab === 'user' ? 'rank' : tab) ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current'));
   if (!view.childElementCount) view.replaceChildren(skeleton());
   try {
-    mine = new Map((await q(sb.from('v_validations').select('*').eq('user_id', me.id))).map(v => [v.move_id, v]));
+    // relus à chaque fois : un vote adopté ou un move accepté change la liste de tout le monde
+    const [list, vals, hid] = await Promise.all([
+      q(sb.from('moves').select(MOVE_COLS).order('position')),
+      q(sb.from('v_validations').select('*').eq('user_id', me.id).eq('dark', dark)),
+      q(sb.from('hidden_moves').select('move_id')),
+    ]);
+    if (token !== routeToken) return deep?.(); // une autre page (ou l'autre mode) a été demandée entre-temps
+    moves = list;
+    mine = new Map(vals.map(v => [v.move_id, v]));
+    hidden = new Set(hid.map(r => r.move_id));
     deep?.();
-    const render = { home, posts: postsView, chat, rank, moves: movesView, user: () => userView(arg) }[tab] || home;
+    const render = { home, posts: postsView, vote: votesView, rank, moves: movesView, user: () => userView(arg) }[tab] || home;
     const content = await render();
     if (token !== routeToken) return; // l'utilisateur a changé d'onglet entre-temps
+    view.querySelectorAll('video').forEach(v => onScreen.unobserve(v)); // les vidéos de l'écran qu'on quitte
     view.replaceChildren(...[content].flat().filter(Boolean));
+    enter(view, tab, `${tab}/${arg}/${dark}`);
   } catch (e) {
     if (token === routeToken) view.replaceChildren(errorState(e));
   }
   refreshBadge();
 }
 
+// nouvel onglet (ou autre mode) : le contenu arrive du côté de l'onglet touché, vite pour ne pas gêner
+const calm = matchMedia('(prefers-reduced-motion: reduce)');
+let shown = '', shownIdx = 0;
+function enter(view, tab, key) {
+  if (key === shown) return; // même écran redessiné (après un vote…) : rien ne bouge
+  const idx = TABS.findIndex(([id]) => id === (tab === 'user' ? 'rank' : tab));
+  const dir = shown ? Math.sign(idx - shownIdx) : 0;
+  shown = key; shownIdx = idx;
+  if (calm.matches) return;
+  [...view.children].slice(0, 6).forEach((el, i) => el.animate(
+    [{ opacity: 0, transform: `translate(${dir * 28}px, ${dir ? 0 : 10}px)` }, { opacity: 1, transform: 'none' }],
+    { duration: 220, delay: i * 25, easing: 'cubic-bezier(.2,.8,.2,1)', fill: 'backwards' }));
+}
+
+// ───────────── Pendant ton absence ─────────────
+// au lancement (et au retour dans l'app) : mes moves validés / refusés et les votes décidés depuis la dernière visite
+const SINCE = 'pk-since';
+const markSeen = () => me?.username && localStorage.setItem(SINCE, new Date().toISOString());
+document.addEventListener('visibilitychange', () => (document.hidden ? markSeen() : whileAway()));
+
+async function whileAway() {
+  const since = localStorage.getItem(SINCE);
+  if (!me?.username || !since) return markSeen(); // 1re visite : rien à raconter
+  const [revs, votes] = await Promise.all([
+    q(sb.from('v_reviews').select('validation_id').eq('owner_id', me.id).neq('kind', 'comment').gt('created_at', since)),
+    q(sb.from('move_votes').select('move_id,status,new_position,demo_path').neq('status', 'open').gt('decided_at', since)),
+  ]).catch(() => [[], []]); // pas de réseau : on réessaiera au prochain retour
+  const ids = [...new Set(revs.map(r => r.validation_id))];
+  const mineNow = ids.length ? await q(sb.from('v_validations').select('*').in('id', ids)).catch(() => []) : [];
+  const name = id => moves.find(m => m.id === id)?.name ?? 'Un move';
+  const lines = [
+    ...mineNow.filter(v => stage(v) !== 'wait').map(v => { const ok = stage(v) === 'done'; // 'todo' = 2 refus
+      return h('li', { class: ok ? 'ok' : 'ko' }, `${ok ? '✅' : '❌'} Ton ${v.move_name}${v.dark ? ' (dark)' : ''} ${ok ? 'est validé' : 'est refusé : reposte-le'}`); }),
+    ...votes.map(v => h('li', { class: v.status === 'passed' ? 'ok' : 'ko' }, v.status === 'passed'
+      ? `🗳️ ${name(v.move_id)} ${v.demo_path ? 'a une nouvelle vidéo démo' : `passe n° ${v.new_position}`}`
+      : `🚫 Vote refusé : ${name(v.move_id)} ${v.demo_path ? '(vidéo démo)' : `n° ${v.new_position}`}`)),
+  ];
+  if (sheet.open) return; // une fenêtre s'est ouverte entre-temps (lien d'une notif, tuto) : on ne la cache pas
+  markSeen();
+  if (lines.length) popup('👋', 'Pendant ton absence', '', h('ul', { class: 'away' }, lines),
+    h('button', { class: 'btn primary block', onclick: () => sheet.close() }, 'Trop bien'));
+}
+
 // ───────────── Onglets ─────────────
 async function home() {
   const [lb, todo] = await Promise.all([
-    q(sb.from('v_leaderboard').select('*')),
-    q(sb.from('v_to_review').select('*').order('created_at', { ascending: false })),
+    q(sb.from('v_leaderboard').select('*').eq('dark', dark)),
+    q(sb.from('v_to_review').select('*').eq('dark', dark).order('created_at', { ascending: false })),
   ]);
   const done = moves.filter(m => isDone(m.id)).length;
   const p = pct(done, moves.length);
   const ranked = sortRank(lb);
-  const next = moves.filter(m => stage(mine.get(m.id)) === 'todo').slice(0, 5); // pas encore postés (ou à reposter)
+  const next = moves.filter(m => !hidden.has(m.id) && stage(mine.get(m.id)) === 'todo').slice(0, 5); // pas encore postés (ou à reposter)
   const noVideo = [...mine.values()].filter(v => !v.video_path && !v.invalid).length;
   const toReview = todo.sort((a, b) => (a.ok_count > 0) - (b.ok_count > 0)); // 0 validation d'abord ; le tri garde les plus récents en premier
   return [
@@ -355,6 +475,7 @@ async function home() {
     pushCard(),
     h('section', { class: 'hero card' }, ring(p), h('div', {},
       h('p', { class: 'muted' }, 'Salut ' + me.username + ' 👋'),
+      h('small', { class: 'comp' }, comp()),
       h('h1', {}, `${done} / ${moves.length} moves`),
       h('p', {}, `#${ranked.findIndex(r => r.user_id === me.id) + 1} sur ${ranked.length} dans la team`))),
     noVideo > 0 && h('button', { class: 'card alert', onclick: openNotifs }, icon('video'),
@@ -378,7 +499,7 @@ async function postsView() {
   const more = h('button', { class: 'btn block', hidden: true, onclick: () => busy(more, load) }, 'Voir plus');
   let from = 0;
   async function load() {
-    const rows = await q(POST_FILTERS[postFilter](sb.from('v_validations').select('*')).order('created_at', { ascending: false }).range(from, from + PAGE - 1));
+    const rows = await q(POST_FILTERS[postFilter](sb.from('v_validations').select('*').eq('dark', dark)).order('created_at', { ascending: false }).range(from, from + PAGE - 1));
     const { urls, votes } = await postsData(rows);
     if (!from && !rows.length) feed.append(empty(postFilter === 'all' ? "Personne n'a encore posté. Lance-toi !" : 'Aucun post ici.'));
     from += rows.length;
@@ -386,19 +507,18 @@ async function postsView() {
     more.hidden = rows.length < PAGE;
   }
   await load();
-  return [h('h1', { class: 'page-title' }, 'Posts'), h('p', { class: 'muted sub' }, 'Les derniers moves postés par toute la team'),
+  return [h('h1', { class: 'page-title' }, 'Posts'), h('p', { class: 'muted sub' }, `Les derniers moves postés par toute la team · ${comp()}`),
     segmented('Filtrer les posts', [['all', 'Tous'], ['wait', 'Non validés'], ['ok', 'Validés'], ['ko', 'Refusés']], postFilter, k => { postFilter = k; route(); }),
     feed, more];
 }
 
 // les liens des vidéos + mes votes (ok/ko) sur ces posts, pour savoir où proposer le vote rapide
 async function postsData(rows) {
-  const paths = rows.map(v => v.video_path).filter(Boolean);
-  const [signed, votes] = await Promise.all([
-    paths.length ? q(sb.storage.from('videos').createSignedUrls(paths, 3600)) : [],
+  const [urls, votes] = await Promise.all([
+    signedUrls(rows.map(v => v.video_path).filter(Boolean)),
     rows.length ? q(sb.from('reviews').select('validation_id,kind').eq('reviewer_id', me.id).neq('kind', 'comment').in('validation_id', rows.map(v => v.id))) : [],
   ]);
-  return { urls: new Map(signed.map(s => [s.path, s.signedUrl])), votes: new Map(votes.map(r => [r.validation_id, r.kind])) };
+  return { urls, votes: new Map(votes.map(r => [r.validation_id, r.kind])) };
 }
 
 // myVote : 'ok' / 'ko' si j'ai déjà jugé ; sinon boutons de vote rapide. after(kind) : quoi redessiner après le vote
@@ -423,59 +543,135 @@ function postCard(v, url, myVote, after) {
   return card;
 }
 
-// shortcut: le chat se relit toutes les 4 s tant qu'il est affiché ; passer à Supabase Realtime si la team grossit beaucoup
-async function chat() {
-  let last = 0; // id du dernier message affiché
-  const listEl = h('ul', { class: 'chat' }, h('li', { class: 'empty' }, 'Aucun message pour l’instant. Lance la discussion ! 💬'));
-  const bubble = m => {
-    const mineMsg = m.user_id === me.id, who = m.profiles?.username;
-    return h('li', { class: mineMsg ? 'mine' : '' }, !mineMsg && avatar(who, m.profiles?.avatar_path, 'small'),
-      h('div', {}, !mineMsg && h('strong', {}, who), h('p', {}, m.body), h('small', { class: 'muted' }, ago(m.created_at))));
-  };
-  async function load() {
-    const rows = (await q(sb.from('chat_messages').select('id,user_id,body,created_at,profiles(username,avatar_path)')
-      .gt('id', last).order('id', { ascending: false }).limit(50))).reverse().filter(m => m.id > last); // 2 lectures en même temps : pas de doublon
-    if (!rows.length) return;
-    const atBottom = innerHeight + scrollY >= document.body.scrollHeight - 120;
-    if (!last) listEl.replaceChildren(); // enlève « aucun message »
-    last = rows.at(-1).id;
-    localStorage.setItem(CHAT_SEEN, last); // lu : la pastille de l'onglet Chat disparaît
-    document.querySelector('.tabs a[data-tab="chat"]')?.classList.remove('unread');
-    listEl.append(...rows.map(bubble));
-    if (atBottom) form.scrollIntoView({ block: 'end' });
-  }
-  const input = h('input', { maxlength: 500, autocomplete: 'off', placeholder: 'Écris à la team…', 'aria-label': 'Message' });
-  const form = h('form', { class: 'chat-form', onsubmit: e => {
+// ───────────── Vote : changer la place d'un move ou sa vidéo démo (4 pour = adopté, 2 contre = refusé) ─────────────
+const VOTE_STATUS = { open: { key: 'wait', label: 'En cours', mark: '◔' }, passed: { key: 'ok', label: 'Adopté', mark: '✓' }, refused: { key: 'ko', label: 'Refusé', mark: '✕' } };
+
+async function votesView() {
+  // shortcut: les 50 derniers votes de chaque onglet ; ajouter « Voir plus » si l'historique devient long
+  const rows = await q(sb.from('move_votes').select('*, profiles!move_votes_user_id_fkey(username,avatar_path), move_ballots(user_id,ok)')
+    .eq('status', voteFilter).order('created_at', { ascending: false }).limit(50));
+  const urls = await signedUrls(rows.map(v => v.demo_path).filter(Boolean));
+  return [h('h1', { class: 'page-title' }, 'Vote'),
+    h('p', { class: 'muted sub' }, 'Change la place d’un move dans la liste ou sa vidéo démo · 4 pour = adopté, 2 contre = refusé'),
+    h('button', { class: 'btn primary block', onclick: () => newVote() }, '＋ Lancer un vote'),
+    segmented('Filtrer les votes', [['open', 'En cours'], ['passed', 'Validés'], ['refused', 'Refusés']], voteFilter, k => { voteFilter = k; route(); }),
+    rows.length ? h('div', { class: 'feed' }, rows.map(v => voteCard(v, urls.get(v.demo_path))))
+      : empty({ open: 'Aucun vote en cours. Lance le premier !', passed: 'Aucun vote adopté pour l’instant.', refused: 'Aucun vote refusé.' }[voteFilter])];
+}
+
+function voteCard(v, url) {
+  const m = moves.find(x => x.id === v.move_id) ?? { id: v.move_id, name: 'Move retiré', position: '?' };
+  const who = v.profiles?.username ?? '?', own = v.user_id === me.id;
+  const yes = v.move_ballots.filter(b => b.ok).length, no = v.move_ballots.length - yes;
+  const myBallot = v.move_ballots.find(b => b.user_id === me.id);
+  const ballot = (btn, ok) => busy(btn, async () => {
+    btn.parentElement.querySelectorAll('button').forEach(b => (b.disabled = true)); // pas de « Pour » puis « Contre » d'affilée
+    try { await q(sb.from('move_ballots').insert({ vote_id: v.id, ok })); } catch (e) { route(); throw e; } // vote fini entre-temps : la carte se met à jour
+    // mon bulletin a peut-être fait passer le vote (4e pour) ou l'a coulé (2e contre), même si d'autres ont voté depuis l'affichage
+    const done = (await q(sb.from('move_votes').select('status').eq('id', v.id).single())).status;
+    route();
+    if (done === 'passed') popup('🎉', 'Vote adopté !', v.demo_path ? `${m.name} a une nouvelle vidéo démo pour toute la team.` : `${m.name} passe n° ${v.new_position} dans la liste de tout le monde.`);
+    else if (done === 'refused') popup('🚫', 'Vote refusé', `2 contre : ${m.name} ne change pas.`);
+    else toast(ok ? 'Tu as voté pour ✓' : 'Tu as voté contre ✕');
+  });
+  return h('article', { class: 'post' },
+    h('div', { class: 'post-head' }, avatar(who, v.profiles?.avatar_path),
+      h('span', { class: 'grow' }, h('strong', {}, own ? 'Toi' : who), h('small', { class: 'muted' }, (v.parent_id ? 'Contre-proposition · ' : '') + ago(v.created_at))),
+      chip(VOTE_STATUS[v.status])),
+    v.demo_path
+      ? [h('h2', { class: 'post-move' }, `🎬 Vidéo démo : ${m.name}`), url ? videoEl(url) : h('div', { class: 'novideo' }, icon('video'), h('span', {}, 'Vidéo introuvable'))]
+      : h('div', { class: 'post-move' }, h('h2', {}, `↕️ ${m.name} → n° ${v.new_position}`),
+        v.status === 'open' && h('small', { class: 'muted' }, `aujourd'hui n° ${m.position}`)),
+    v.reason && h('p', { class: 'reason' }, '« ' + v.reason + ' »'),
+    h('div', { class: 'post-foot' }, h('span', { class: 'ok' }, `✓ ${yes} / 4`), h('span', { class: 'ko' }, `✕ ${no} / 2`), h('span', { class: 'grow' }),
+      h('span', { class: 'muted' }, myBallot ? (myBallot.ok ? '✓ Tu as voté pour' : '✕ Tu as voté contre') : own && v.status === 'open' ? 'Les autres votent' : '')),
+    v.status === 'open' && !own && !myBallot && h('div', { class: 'quick stack' },
+      h('div', { class: 'vote' },
+        h('button', { class: 'btn ok', onclick: e => ballot(e.currentTarget, true) }, '✓ Pour'),
+        h('button', { class: 'btn ko', onclick: e => ballot(e.currentTarget, false) }, '✕ Contre')),
+      !v.demo_path && h('button', { class: 'btn ghost block', onclick: () => counterVote(v, m) }, '↕️ Proposer une autre place')),
+    v.status === 'refused' && h('div', { class: 'quick' }, h('button', { class: 'btn block', onclick: () => newVote(v) },
+      '↻ Reproposer')));
+}
+
+// nouveau vote ; pre = un vote refusé à reproposer (pareil, ou en changeant la place / la vidéo)
+function newVote(pre = {}) {
+  let kind = pre.demo_path ? 'demo' : 'place';
+  const moveSel = h('select', { 'aria-label': 'Move' }, h('option', { value: '' }, 'Choisis un move…'),
+    moves.map(m => h('option', { value: m.id, selected: m.id === pre.move_id }, `n° ${m.position} · ${m.name}`)));
+  const pos = h('input', { type: 'number', min: 1, max: moves.length, inputmode: 'numeric', value: pre.new_position ?? '' });
+  const reason = h('textarea', { rows: 2, maxlength: 500, placeholder: 'Ex. : plus facile que le move d’avant' }, pre.reason ?? '');
+  const picker = videoPicker(pre.demo_path ? 'Choisir une autre vidéo (sinon la même)' : 'Choisir ou filmer la vidéo démo');
+  const placeBox = h('label', { class: 'field' }, h('span', {}, 'Nouvelle place (n°)'), pos);
+  const show = () => { placeBox.hidden = pos.disabled = kind !== 'place'; picker.el.hidden = kind !== 'demo'; }; // désactivé = pas vérifié par le navigateur
+  const label = pre.move_id ? 'Reproposer' : 'Lancer le vote';
+  const btn = h('button', { class: 'btn primary block', type: 'submit' }, label);
+  const save = e => {
     e.preventDefault();
-    const body = input.value.trim();
-    if (body) busy(e.submitter, async () => {
-      await q(sb.from('chat_messages').insert({ body }));
-      input.value = '';
-      await load();
-      form.scrollIntoView({ block: 'end' });
+    busy(btn, async () => {
+      const m = moves.find(x => x.id === +moveSel.value);
+      if (!m) throw new Error('Choisis un move.');
+      const row = { move_id: m.id, reason: reason.value.trim() };
+      if (kind === 'place') {
+        row.new_position = Math.round(+pos.value);
+        if (!(row.new_position >= 1 && row.new_position <= moves.length)) throw new Error(`Choisis une place entre 1 et ${moves.length}.`);
+        if (row.new_position === m.position) throw new Error(`${m.name} est déjà n° ${m.position}.`);
+      } else {
+        const file = picker.file();
+        if (!file && !pre.demo_path) throw new Error('Choisis la vidéo démo.');
+        row.demo_path = file ? await uploadVideo(file, 'demo', picker.range(), p => (btn.textContent = `Compression… ${Math.round(p * 100)} %`)) : pre.demo_path;
+      }
+      await q(sb.from('move_votes').insert(row));
+      voteFilter = 'open';
+      location.hash === '#vote' ? (scrollTo(0, 0), route()) : (location.hash = '#vote'); // son vote apparaît en haut
+      popup('🗳️', 'Vote lancé !', `La team vote pour ${kind === 'place' ? `mettre ${m.name} n° ${row.new_position}` : `la vidéo démo de ${m.name}`}. 4 pour = adopté, 2 contre = refusé.`);
+    }).finally(() => (btn.textContent = label));
+  };
+  openSheet(pre.move_id ? 'Reproposer le vote' : 'Lancer un vote', h('form', { class: 'stack', onsubmit: save },
+    segmented('Type de vote', [['place', '↕️ Changer sa place'], ['demo', '🎬 Vidéo démo']], kind, k => { kind = k; show(); }),
+    h('label', { class: 'field' }, h('span', {}, 'Move'), moveSel),
+    placeBox, picker.el,
+    h('label', { class: 'field' }, h('span', {}, 'Pourquoi ? (facultatif)'), reason),
+    h('p', { class: 'hint' }, '4 pour = adopté pour toute la team · 2 contre = refusé'),
+    btn));
+  show();
+}
+
+// « Autre place » : une contre-proposition à 10 places max de celle proposée, votée à part
+function counterVote(v, m) {
+  const lo = Math.max(1, v.new_position - 10), hi = Math.min(moves.length, v.new_position + 10);
+  const save = e => {
+    e.preventDefault();
+    busy(e.submitter, async () => {
+      const p = Math.round(+e.target.pos.value);
+      if (p === v.new_position) throw new Error('Choisis une autre place que celle proposée.');
+      await q(sb.from('move_votes').insert({ move_id: v.move_id, new_position: p, parent_id: v.id, reason: e.target.reason.value.trim() }));
+      route();
+      popup('🗳️', 'Contre-proposition lancée !', `${m.name} n° ${p} : la team vote à part. 4 pour = adopté, 2 contre = refusé.`);
     });
-  } }, input, h('button', { class: 'btn primary', type: 'submit' }, 'Envoyer'));
-  const token = routeToken; // un autre onglet (ou un nouvel affichage) arrête la relecture ; lu avant le chargement
-  await load();
-  const timer = setInterval(() => (token !== routeToken ? clearInterval(timer) : document.hidden || load().catch(() => {})), 4000);
-  setTimeout(() => form.scrollIntoView({ block: 'end' })); // une fois affiché : en bas, sur les derniers messages
-  return [h('h1', { class: 'page-title' }, 'Chat'), h('p', { class: 'muted sub' }, 'Toute la team'), listEl, form];
+  };
+  openSheet(`Autre place : ${m.name}`, h('form', { class: 'stack', onsubmit: save },
+    h('p', { class: 'muted' }, `Proposé : n° ${v.new_position} (aujourd'hui n° ${m.position}). Tu peux proposer de n° ${lo} à n° ${hi}.`),
+    h('label', { class: 'field' }, h('span', {}, 'Ta place (n°)'), h('input', { name: 'pos', type: 'number', min: lo, max: hi, required: true, inputmode: 'numeric' })),
+    h('label', { class: 'field' }, h('span', {}, 'Pourquoi ? (facultatif)'), h('textarea', { name: 'reason', rows: 2, maxlength: 500 })),
+    h('p', { class: 'hint' }, 'Elle est votée à part, comme un nouveau vote.'),
+    h('button', { class: 'btn primary block', type: 'submit' }, 'Lancer la contre-proposition')));
 }
 
 async function rank() {
-  const [lb, todo] = await Promise.all([q(sb.from('v_leaderboard').select('*')),
-    q(sb.from('v_validations').select('user_id').eq('ok_count', 0).eq('ko_count', 0).neq('user_id', me.id))]);
+  const [lb, todo] = await Promise.all([q(sb.from('v_leaderboard').select('*').eq('dark', dark)),
+    q(sb.from('v_validations').select('user_id').eq('dark', dark).eq('ok_count', 0).eq('ko_count', 0).neq('user_id', me.id))]);
   const waiting = new Set(todo.map(v => v.user_id)); // pastille rouge : il a un move que personne n'a encore validé ni refusé
-  return [h('h1', { class: 'page-title' }, 'Classement'), h('p', { class: 'muted sub' }, "% de la liste validée · touche quelqu'un pour voir son profil"),
+  return [h('h1', { class: 'page-title' }, 'Classement'), h('p', { class: 'muted sub' }, `${comp()} · % de la liste validée · touche quelqu'un pour voir son profil`),
     h('ol', { class: 'list rank' }, sortRank(lb).map((r, i) => memberRow(r, i, waiting.has(r.user_id))))];
 }
 
-// les moves de la liste avec recherche et filtres, pour moi (map = mine) ou pour un autre
-function movesList(map, onOpen) {
+// les moves de la liste avec recherche et filtres, pour moi (map = mine) ou pour un autre ; skip = moves cachés
+function movesList(map, onOpen, skip = new Set()) {
   const listEl = h('ul', { class: 'list' });
   const draw = () => {
     const s = search.trim().toLowerCase();
-    const items = moves.filter(m => (filter === 'all' || stage(map.get(m.id)) === filter) && m.name.toLowerCase().includes(s));
+    const items = moves.filter(m => !skip.has(m.id) && (filter === 'all' || stage(map.get(m.id)) === filter) && m.name.toLowerCase().includes(s));
     listEl.replaceChildren(...(items.length ? items.map(m => moveRow(m, map, onOpen)) : [h('li', {}, empty('Aucun move ne correspond.'))]));
   };
   draw();
@@ -488,33 +684,58 @@ function movesList(map, onOpen) {
 function movesView() {
   return [h('h1', { class: 'page-title' }, 'Mes moves'),
     h('p', { class: 'muted sub' }, `${moves.filter(m => isDone(m.id)).length} validés sur ${moves.length} · touche un move pour le valider`),
-    ...movesList(mine, openMove),
-    h('button', { class: 'btn ghost block propose', onclick: proposeMove }, '💡 Proposer un move')];
+    ...movesList(mine, openMove, hidden),
+    hidden.size > 0 && h('button', { class: 'btn ghost block propose', onclick: openHidden }, `🙈 Moves cachés (${hidden.size})`),
+    h('button', { class: 'btn ghost block', onclick: proposeMove }, '💡 Proposer un move')];
+}
+
+// cacher un move de ma liste (et de « Prochains moves ») ; le classement ne change pas
+function hideBtn(m) {
+  const on = hidden.has(m.id);
+  return h('button', { class: 'btn ghost block', onclick: e => busy(e.currentTarget, async () => {
+    await q(on ? sb.from('hidden_moves').delete().eq('move_id', m.id) : sb.from('hidden_moves').insert({ move_id: m.id }));
+    sheet.close();
+    toast(on ? `${m.name} est de retour dans ta liste 👁️` : `${m.name} caché. Retrouve-le en bas de « Mes moves ».`);
+    route();
+  }) }, on ? '👁️ Remettre dans ma liste' : '🙈 Cacher de ma liste');
+}
+
+function openHidden() {
+  openSheet('Moves cachés', h('div', { class: 'stack' },
+    h('p', { class: 'hint' }, 'Touche un move pour le voir ou le remettre dans ta liste.'),
+    list(moves.filter(m => hidden.has(m.id)).map(m => moveRow(m)))));
 }
 
 function proposeMove() {
+  const picker = videoPicker('Ajouter une vidéo démo (facultatif)');
+  const btn = h('button', { class: 'btn primary block', type: 'submit' }, 'Envoyer');
   const save = e => {
     e.preventDefault();
-    busy(e.submitter, async () => {
-      await q(sb.from('move_proposals').insert({ name: e.target.name.value.trim() }));
-      sheet.close();
-      toast("Proposition envoyée à l'admin 👍");
-    });
+    const f = e.target;
+    busy(btn, async () => {
+      const file = picker.file();
+      const demo_path = file ? await uploadVideo(file, 'demo', picker.range(), p => (btn.textContent = `Compression… ${Math.round(p * 100)} %`)) : null;
+      await q(sb.from('move_proposals').insert({ name: f.name.value.trim(), points: f.points.value === '' ? null : +f.points.value, demo_path }));
+      popup('📨', 'Demande envoyée !', `L'admin a bien reçu « ${f.name.value.trim()} ». S'il l'accepte, il arrive dans la liste et toute la team est prévenue.`);
+    }).finally(() => (btn.textContent = 'Envoyer'));
   };
   openSheet('Proposer un move', h('form', { class: 'stack', onsubmit: save },
     h('label', { class: 'field' }, h('span', {}, 'Nom du move'), h('input', { name: 'name', required: true, minlength: 2, maxlength: 60 })),
-    h('p', { class: 'hint' }, "L'admin l'ajoute à la liste s'il l'accepte."),
-    h('button', { class: 'btn primary block', type: 'submit' }, 'Envoyer')));
+    h('label', { class: 'field' }, h('span', {}, 'Points (facultatif)'),
+      h('input', { name: 'points', type: 'number', min: 0, max: 99, step: 0.1, inputmode: 'decimal', placeholder: 'Vide = inconnue' })),
+    picker.el,
+    h('p', { class: 'hint' }, "L'admin l'ajoute en bas de la liste s'il l'accepte ; un vote peut ensuite le déplacer."),
+    btn));
 }
 
 async function userView(id) {
   const [[p], vals] = await Promise.all([
-    q(sb.from('v_leaderboard').select('*').eq('user_id', id)),
-    q(sb.from('v_validations').select('*').eq('user_id', id).order('move_id')),
+    q(sb.from('v_leaderboard').select('*').eq('user_id', id).eq('dark', dark)),
+    q(sb.from('v_validations').select('*').eq('user_id', id).eq('dark', dark)),
   ]);
   if (!p) return empty('Membre introuvable.');
   const own = id === me.id, pc = pct(p.done, p.total);
-  const openTheirs = (m, v) => (v ? openValidation(v) : openSheet(m.name, h('div', { class: 'stack' }, empty(`${p.username} ne l'a pas encore posté.`), videosBtn(m))));
+  const openTheirs = (m, v) => (v ? openValidation(v) : openSheet(m.name, h('div', { class: 'stack' }, moveInfo(m, true), empty(`${p.username} ne l'a pas encore posté.`), videosBtn(m))));
   return [h('a', { class: 'back', href: '#rank' }, '← Classement'),
     h('section', { class: 'hero card' }, avatar(p.username, p.avatar_path, 'big'), h('div', { class: 'grow' },
       h('h1', {}, p.username + (own ? ' (toi)' : '')), h('p', {}, `${p.done} / ${p.total} moves validés · ${pc}%`), bar(pc),
@@ -527,7 +748,7 @@ async function userView(id) {
         h('button', { class: 'btn small', onclick: () => changeName() }, '✏️ Changer mon nom')),
       !own && me.is_admin && h('div', { class: 'own-actions' }, h('button', { class: 'btn small', onclick: () => changeName(p) }, '✏️ Renommer (admin)')))),
     h('h2', { class: 'section-title' }, own ? 'Mes moves' : `Les moves de ${p.username}`),
-    ...movesList(new Map(vals.map(v => [v.move_id, v])), own ? openMove : openTheirs)];
+    ...movesList(new Map(vals.map(v => [v.move_id, v])), own ? openMove : openTheirs, own ? hidden : undefined)];
 }
 
 // le nom sert aussi à se connecter : on change les deux d'un coup (la base recopie le nom dans le profil)
@@ -603,6 +824,7 @@ async function changeAvatar(blob) {
 
 // ───────────── Fenêtre du bas (détail d'un move) ─────────────
 function openSheet(title, ...content) {
+  sheet.classList.remove('pop');
   sheet.replaceChildren(
     h('div', { class: 'sheet-head' }, h('h2', { id: 'sheet-title' }, title),
       h('button', { class: 'icon-btn', 'aria-label': 'Fermer', onclick: () => sheet.close() }, icon('x'))),
@@ -612,29 +834,54 @@ function openSheet(title, ...content) {
 sheet.addEventListener('click', e => e.target === sheet && sheet.close()); // clic à côté = fermer
 sheet.addEventListener('close', () => !sheet.open && sheet.replaceChildren()); // coupe la vidéo
 
+// pop-up au centre pour les moments importants (move validé, demande envoyée, vote…), avec des confettis
+function popup(emoji, title, text, ...actions) {
+  if (sheet.open) sheet.close();
+  sheet.classList.add('pop');
+  sheet.replaceChildren(h('div', { class: 'pop-body' },
+    h('div', { class: 'pop-emoji', 'aria-hidden': 'true' }, emoji),
+    h('h2', { id: 'sheet-title' }, title),
+    text && h('p', { class: 'muted' }, text),
+    ...(actions.length ? actions : [h('button', { class: 'btn primary block', onclick: () => sheet.close() }, 'OK')])));
+  sheet.showModal(); // rouverte : l'animation repart
+  if (calm.matches) return;
+  const colors = ['var(--accent)', 'var(--ok)', 'var(--warn)', '#fff'];
+  const burst = h('div', { class: 'confetti', 'aria-hidden': 'true' }, Array.from({ length: 22 }, (_, i) => h('i', {
+    style: `left:${35 + Math.random() * 30}%;--x:${Math.round((Math.random() - 0.5) * 300)}px;--r:${Math.round(Math.random() * 720 - 360)}deg;--d:${(Math.random() * 0.2).toFixed(2)}s;background:${colors[i % 4]}` })));
+  sheet.append(burst);
+  setTimeout(() => burst.remove(), 1500);
+}
+
 function openMove(m) {
   const v = mine.get(m.id);
   if (v) return openValidation(v);
-  openSheet(m.name, h('div', { class: 'stack' }, videosBtn(m), uploadForm(m, null)));
+  openSheet(m.name, h('div', { class: 'stack' }, moveInfo(m, true), videosBtn(m), uploadForm(m, null), hideBtn(m)));
+}
+
+// place, points et vidéo démo d'un move (démo ouverte d'office si on n'a pas encore d'autre vidéo à regarder)
+function moveInfo(m, openDemo) {
+  const demo = m.demo_path && h('details', { class: 'demo', open: openDemo }, h('summary', {}, '🎬 Vidéo démo'));
+  if (demo) signedUrls([m.demo_path]).then(u => demo.append(videoEl(u.get(m.demo_path))), () => demo.remove());
+  return [h('div', { class: 'meta' }, h('span', { class: 'chip' }, `n° ${m.position}`), h('span', { class: 'chip points' }, '⭐ ' + fmtPoints(m.points))), demo];
 }
 
 // « Voir (N) » : les vidéos de ce move postées par toute la team
-const moveVideos = m => q(sb.from('v_validations').select('*').eq('move_id', m.id).not('video_path', 'is', null).order('created_at', { ascending: false }));
-function videosBtn(m) {
+const moveVideos = (m, d = dark) => q(sb.from('v_validations').select('*').eq('move_id', m.id).eq('dark', d).not('video_path', 'is', null).order('created_at', { ascending: false }));
+function videosBtn(m, d = dark) { // d : compétition (un post ouvert depuis une notif peut être de l'autre mode)
   const btn = h('button', { class: 'btn block', disabled: true }, '👀 Voir les vidéos…');
-  moveVideos(m).then(rows => {
+  moveVideos(m, d).then(rows => {
     btn.textContent = rows.length ? `👀 Voir (${rows.length} ${rows.length > 1 ? 'personnes ont' : 'personne a'} posté une vidéo)` : 'Personne n’a encore posté de vidéo de ce move';
     btn.disabled = !rows.length;
-    btn.addEventListener('click', () => busy(btn, () => openMoveVideos(m, rows)));
+    btn.addEventListener('click', () => busy(btn, () => openMoveVideos(m, rows, d)));
   }, () => btn.remove());
   return btn;
 }
 
-async function openMoveVideos(m, rows) {
-  rows ??= await moveVideos(m);
+async function openMoveVideos(m, rows, d = dark) {
+  rows ??= await moveVideos(m, d);
   const { urls, votes } = await postsData(rows);
   openSheet(m.name, rows.length
-    ? h('div', { class: 'feed' }, rows.map(v => postCard(v, urls.get(v.video_path), votes.get(v.id), () => openMoveVideos(m))))
+    ? h('div', { class: 'feed' }, rows.map(v => postCard(v, urls.get(v.video_path), votes.get(v.id), () => openMoveVideos(m, null, d))))
     : empty('Plus aucune vidéo de ce move.'));
 }
 
@@ -654,19 +901,21 @@ async function refreshValidation(id) {
 
 async function openValidation(v) {
   const own = v.user_id === me.id;
+  const m = moves.find(x => x.id === v.move_id) ?? { id: v.move_id, name: v.move_name, position: '?' };
   const body = h('div', { class: 'stack' }, h('p', { class: 'muted' }, 'Chargement…'));
   openSheet(v.move_name, body);
   try {
     const [reviews, url] = await Promise.all([
       q(sb.from('v_reviews').select('*').eq('validation_id', v.id).order('created_at')),
-      v.video_path ? sb.storage.from('videos').createSignedUrl(v.video_path, 3600).then(r => r.data?.signedUrl) : null,
+      v.video_path ? signedUrls([v.video_path]).then(u => u.get(v.video_path)).catch(() => null) : null,
     ]);
     const myVote = reviews.find(r => r.reviewer_id === me.id && r.kind !== 'comment');
     body.replaceChildren(...[ // filter : les blocs absents (false) ne doivent pas s'afficher en texte
       h('div', { class: 'meta' }, chip(status(v)), h('span', { class: 'muted' }, `posté par ${own ? 'toi' : v.username} · ${ago(v.created_at)}`)),
       url ? videoEl(url)
         : h('div', { class: 'novideo' }, icon('video'), h('span', {}, own ? 'Pas encore de vidéo.' : `Pas encore de vidéo, elle est demandée à ${v.username}.`)),
-      videosBtn({ id: v.move_id, name: v.move_name }),
+      ...moveInfo(m, false),
+      videosBtn(m, v.dark),
       h('div', { class: 'score' },
         h('span', { class: 'ok' }, `✓ ${v.ok_count} validation${v.ok_count > 1 ? 's' : ''}`),
         h('span', { class: 'ko' }, `✕ ${v.ko_count} refus`),
@@ -683,15 +932,15 @@ async function openValidation(v) {
       h('h3', {}, 'Avis & commentaires'),
       reviews.length ? h('ul', { class: 'reviews' }, reviews.map(reviewItem)) : h('p', { class: 'muted' }, "Aucun avis pour l'instant."),
       !own && commentForm(v), // pas de commentaire sur ses propres posts
+      own && hideBtn(m),
     ].filter(Boolean));
   } catch (e) {
-    body.replaceChildren(errorState(e));
+    body.replaceChildren(errorState(e, () => openValidation(v)));
   }
 }
 
-function uploadForm(m, v) {
-  // v absent : première validation ; v sans vidéo : on ajoute la vidéo ; v non valide : on reposte (les refus repartent à 0)
-  const addOnly = v && !v.invalid;
+// choisir une vidéo et le passage à garder (8 s max) ; sert pour valider un move et pour les vidéos démo
+function videoPicker(text = 'Choisir ou filmer une vidéo') {
   const input = h('input', { type: 'file', accept: 'video/*', class: 'file' });
   const picked = h('small', { class: 'muted' }, 'Aucune vidéo choisie');
 
@@ -747,32 +996,43 @@ function uploadForm(m, v) {
     trimBox.hidden = true;
     if (f) preview.src = URL.createObjectURL(f);
   });
+  return { el: h('div', { class: 'stack' }, h('label', { class: 'drop' }, icon('video'), h('strong', {}, text), picked, input), preview, trimBox),
+    file: () => input.files[0], range };
+}
+
+function uploadForm(m, v) {
+  // v absent : première validation ; v sans vidéo : on ajoute la vidéo ; v non valide : on reposte (les refus repartent à 0)
+  const addOnly = v && !v.invalid;
+  const picker = videoPicker();
   const label = addOnly ? 'Envoyer la vidéo' : v ? 'Reposter avec une nouvelle vidéo' : 'Poster ma validation';
   const btn = h('button', { class: 'btn primary block', onclick: () => busy(btn, async () => {
-    const file = input.files[0];
+    const file = picker.file();
     if (!file && addOnly) return toast('Choisis une vidéo.', true);
     if (!file && !confirm('Valider sans vidéo ? Elle te sera demandée dans les notifications.')) return;
-    const path = file ? await uploadVideo(file, m.id, range(), p => (btn.textContent = `Compression… ${Math.round(p * 100)} %`)) : null;
+    const path = file ? await uploadVideo(file, m.id, picker.range(), p => (btn.textContent = `Compression… ${Math.round(p * 100)} %`)) : null;
+    let id = v?.id;
     if (addOnly) {
       await q(sb.from('validations').update({ video_path: path }).eq('id', v.id));
     } else {
       if (v) await removeValidation(v);
-      await q(sb.from('validations').insert({ move_id: m.id, video_path: path }));
+      // un repost garde la compétition du move (même ouvert depuis une notif de l'autre mode)
+      id = (await q(sb.from('validations').insert({ move_id: m.id, video_path: path, dark: v ? v.dark : dark }).select('id').single())).id;
     }
-    sheet.close();
-    toast(addOnly ? 'Vidéo ajoutée 📹' : 'Move validé ! 🔥');
     route();
+    // pop-up de bravo, puis on arrive sur le post
+    const go = h('button', { class: 'btn primary block go', onclick: () => openValidationById(id) }, 'Voir mon post');
+    popup(addOnly ? '📹' : '🔥', addOnly ? 'Vidéo ajoutée !' : 'Move validé !',
+      path ? `${m.name} est posté : la team va donner son avis.` : `${m.name} est posté. Ajoute la vidéo dès que tu peux : elle t'est demandée dans les notifs.`, go);
+    setTimeout(() => go.isConnected && go.click(), 2200); // sauf si la pop-up a été fermée entre-temps
   }).finally(() => (btn.textContent = label)) }, label);
   return h('div', { class: 'stack' },
     v?.invalid && h('p', { class: 'warnbox' }, "Ce move n'est plus valide (2 refus). Reposte-le avec une nouvelle vidéo."),
-    h('label', { class: 'drop' }, icon('video'), h('strong', {}, 'Choisir ou filmer une vidéo'), picked, input),
-    preview,
-    trimBox,
+    picker.el,
     btn,
     !addOnly && h('p', { class: 'hint' }, "Pas de vidéo sous la main ? Poste quand même, elle te sera demandée dans les notifications."));
 }
 
-// coupe le passage et le réencode en 480p léger, directement sur le téléphone (rien n'est envoyé avant)
+// coupe le passage et le réencode en 720p, directement sur le téléphone (rien n'est envoyé avant)
 async function compress(file, [start, end], onProgress) {
   const mb = await import(MEDIABUNNY); // chargé seulement au moment de poster une vidéo
   const output = new mb.Output({ format: new mb.Mp4OutputFormat(), target: new mb.BufferTarget() });
@@ -782,8 +1042,8 @@ async function compress(file, [start, end], onProgress) {
     trim: { start, end },
     video: async t => {
       const w = await t.getDisplayWidth(), hgt = await t.getDisplayHeight();
-      const side = Math.min(480, w, hgt) & ~1; // petit côté à 480 px (pair pour l'encodeur)
-      return { codec: 'avc', [w > hgt ? 'height' : 'width']: side, frameRate: 30, quality: new mb.Quality({ bitrate: 350_000 }) };
+      const side = Math.min(720, w, hgt) & ~1; // petit côté à 720 px (pair pour l'encodeur)
+      return { codec: 'avc', [w > hgt ? 'height' : 'width']: side, frameRate: 30, quality: new mb.Quality({ bitrate: 1_500_000 }) };
     },
     audio: { codec: 'aac', quality: new mb.Quality({ bitrate: 48_000 }) }, // son retiré si le téléphone ne sait pas l'encoder
     showWarnings: false,
@@ -794,10 +1054,11 @@ async function compress(file, [start, end], onProgress) {
   return new Blob([output.target.buffer], { type: 'video/mp4' });
 }
 
-async function uploadVideo(file, moveId, range, onProgress) {
+async function uploadVideo(file, name, range, onProgress) { // name : id du move, ou 'demo'
   const small = await compress(file, range, onProgress);
-  const path = `${me.id}/${moveId}-${Date.now()}.mp4`;
-  await q(sb.storage.from('videos').upload(path, small, { contentType: 'video/mp4' }));
+  const path = `${me.id}/${name}-${Date.now()}.mp4`;
+  // chemin unique, vidéo jamais modifiée : le téléphone peut la garder en cache 1 an
+  await q(sb.storage.from('videos').upload(path, small, { contentType: 'video/mp4', cacheControl: '31536000' }));
   return path;
 }
 
@@ -881,21 +1142,20 @@ function commentForm(v) {
 
 // ───────────── Notifications ─────────────
 async function fetchNotifs() {
-  const reviews = await q(sb.from('v_reviews').select('*').eq('owner_id', me.id).neq('reviewer_id', me.id)
+  const reviews = await q(sb.from('v_reviews').select('*').eq('owner_id', me.id).eq('dark', dark).neq('reviewer_id', me.id)
     .order('created_at', { ascending: false }).limit(30));
-  const proposals = me.is_admin ? await q(sb.from('move_proposals').select('id,name,created_at,profiles(username)').order('created_at')) : [];
+  const proposals = me.is_admin ? await q(sb.from('move_proposals').select('id,name,points,demo_path,created_at,profiles(username)').order('created_at')) : [];
   const mineList = [...mine.values()];
   return { reviews, proposals, noVideo: mineList.filter(v => !v.video_path && !v.invalid), invalid: mineList.filter(v => v.invalid) };
 }
 
-// pastille rouge sur l'onglet Chat : un message d'un autre, plus récent que le dernier lu sur ce téléphone
-const CHAT_SEEN = 'pk-chat-seen';
-async function refreshChatDot() {
-  const tab = document.querySelector('.tabs a[data-tab="chat"]');
-  const [newest] = await q(sb.from('chat_messages').select('id').neq('user_id', me.id).order('id', { ascending: false }).limit(1)).catch(() => []);
-  const unread = !!newest && newest.id > +(localStorage.getItem(CHAT_SEEN) || 0);
-  tab?.classList.toggle('unread', unread);
-  tab?.setAttribute('aria-label', unread ? 'Chat (nouveaux messages)' : 'Chat');
+// pastille rouge sur l'onglet Vote : un vote en cours des autres où je n'ai pas encore voté
+async function refreshVoteDot() {
+  const tab = document.querySelector('.tabs a[data-tab="vote"]');
+  const open = await q(sb.from('move_votes').select('id,move_ballots(user_id)').eq('status', 'open').neq('user_id', me.id)).catch(() => []);
+  const todo = open.some(v => !v.move_ballots.some(b => b.user_id === me.id));
+  tab?.classList.toggle('unread', todo);
+  tab?.setAttribute('aria-label', todo ? 'Vote (des votes t’attendent)' : 'Vote');
 }
 // en revenant sur l'app (sortie de veille, autre appli) : cloche et pastille à jour
 document.addEventListener('visibilitychange', () => !document.hidden && me?.username && refreshBadge());
@@ -903,10 +1163,10 @@ document.addEventListener('visibilitychange', () => !document.hidden && me?.user
 async function refreshBadge() {
   const badge = document.getElementById('badge');
   if (!badge) return;
-  refreshChatDot();
+  refreshVoteDot();
   try {
     const { reviews, proposals, noVideo, invalid } = await fetchNotifs();
-    const seen = localStorage.getItem(SEEN_KEY) || '';
+    const seen = localStorage.getItem(seenKey()) || '';
     const n = proposals.length + noVideo.length + invalid.length + reviews.filter(r => r.created_at > seen).length;
     badge.textContent = n > 9 ? '9+' : n;
     badge.hidden = !n;
@@ -918,23 +1178,14 @@ async function openNotifs() {
   openSheet('Notifications', body);
   try {
     const { reviews, proposals, noVideo, invalid } = await fetchNotifs();
-    const seen = localStorage.getItem(SEEN_KEY) || '';
-    if (reviews[0]) localStorage.setItem(SEEN_KEY, reviews[0].created_at); // heure serveur, pas l'horloge du tél
+    const seen = localStorage.getItem(seenKey()) || '';
+    if (reviews[0]) localStorage.setItem(seenKey(), reviews[0].created_at); // heure serveur, pas l'horloge du tél
     const verb = { ok: 'a validé', ko: "n'a pas validé", comment: 'a commenté' };
     const item = (cls, title, text, onclick, isNew) => h('li', {}, h('button', { class: 'row notif ' + cls + (isNew ? ' new' : ''), onclick },
       h('span', { class: 'grow' }, h('strong', {}, title), text && h('small', { class: 'muted' }, text)), isNew && h('span', { class: 'dot', 'aria-label': 'nouveau' })));
-    const decide = (btn, p, accept) => busy(btn, async () => {
-      await q(sb.rpc('review_proposal', { proposal_id: p.id, accept }));
-      if (accept) moves = await q(sb.from('moves').select('id,name').order('id'));
-      await openNotifs(); // avant le toast : le redessin de la fenêtre l'effacerait
-      toast(accept ? `${p.name} ajouté à la liste ✅` : 'Proposition refusée.');
-    });
     const items = [
-      ...proposals.map(p => h('li', { class: 'card proposal' },
-        h('strong', {}, `💡 ${p.profiles?.username ?? 'Quelqu’un'} propose : ${p.name}`), h('small', { class: 'muted' }, ago(p.created_at)),
-        h('div', { class: 'vote' },
-          h('button', { class: 'btn ok', onclick: e => decide(e.currentTarget, p, true) }, 'Accepter'),
-          h('button', { class: 'btn', onclick: e => decide(e.currentTarget, p, false) }, 'Refuser')))),
+      ...proposals.map(p => item('proposal', `💡 ${p.profiles?.username ?? 'Quelqu’un'} propose : ${p.name}`,
+        `${ago(p.created_at)} · touche pour tout voir et décider`, () => openProposal(p), true)),
       ...invalid.map(v => item('ko', `${v.move_name} n'est plus valide`, '2 refus : reposte-le avec une nouvelle vidéo.', () => openValidation(v))),
       ...noVideo.map(v => item('warn', `📹 Vidéo demandée : ${v.move_name}`, "Tu l'as validé sans vidéo, ajoute-la pour que la team vérifie.", () => openValidation(v))),
       ...reviews.map(r => item(r.kind, `${r.reviewer_name} ${verb[r.kind]} ton ${r.move_name}`,
@@ -943,6 +1194,33 @@ async function openNotifs() {
     body.replaceChildren(items.length ? h('ul', { class: 'list' }, items) : empty('Rien de neuf pour toi.'));
     refreshBadge();
   } catch (e) {
-    body.replaceChildren(errorState(e));
+    body.replaceChildren(errorState(e, openNotifs));
+  }
+}
+
+// l'admin voit tout d'un move proposé (points, vidéo démo) avant d'accepter ou refuser
+async function openProposal(p) {
+  const who = p.profiles?.username ?? 'quelqu’un';
+  const decide = (btn, accept) => busy(btn, async () => {
+    await q(sb.rpc('review_proposal', { proposal_id: p.id, accept }));
+    if (!accept && p.demo_path) await sb.storage.from('videos').remove([p.demo_path]); // au pire un fichier orphelin
+    await openNotifs(); // avant le toast : le redessin de la fenêtre l'effacerait
+    toast(accept ? `${p.name} ajouté en bas de la liste ✅` : 'Proposition refusée.');
+    route();
+  });
+  const body = h('div', { class: 'stack' }, h('p', { class: 'muted' }, 'Chargement…'));
+  openSheet(`💡 ${p.name}`, body);
+  try {
+    const url = p.demo_path && (await signedUrls([p.demo_path])).get(p.demo_path);
+    body.replaceChildren(
+      h('div', { class: 'meta' }, h('span', { class: 'chip points' }, '⭐ ' + fmtPoints(p.points)), h('span', { class: 'muted' }, `proposé par ${who} · ${ago(p.created_at)}`)),
+      url ? videoEl(url) : h('div', { class: 'novideo' }, icon('video'), h('span', {}, 'Pas de vidéo démo')),
+      h('p', { class: 'hint' }, `Accepté, il arrive en bas de la liste (n° ${moves.length + 1}) ; un vote de la team peut ensuite le déplacer.`),
+      h('div', { class: 'vote' },
+        h('button', { class: 'btn ok', onclick: e => decide(e.currentTarget, true) }, '✓ Accepter'),
+        h('button', { class: 'btn ko', onclick: e => decide(e.currentTarget, false) }, '✕ Refuser')),
+      h('button', { class: 'btn ghost block', onclick: openNotifs }, '← Retour aux notifications'));
+  } catch (e) {
+    body.replaceChildren(errorState(e, () => openProposal(p)));
   }
 }

@@ -27,7 +27,7 @@ body {
 body:has(dialog[open]) { overflow: hidden; }
 h1, h2, h3, p { margin: 0; }
 a { color: inherit; text-decoration: none; }
-button, input, textarea { font: inherit; color: inherit; }
+button, input, textarea, select { font: inherit; color: inherit; }
 small { font-size: .8rem; }
 .muted { color: var(--muted); }
 .grow { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -72,12 +72,12 @@ small { font-size: .8rem; }
 }
 .brand.small .logo { width: 30px; height: 30px; font-size: .8rem; border-radius: 8px; }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: .9rem; color: var(--muted); }
-input, textarea {
+input, textarea, select {
   width: 100%; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line);
   background: var(--surface); color: var(--text); font-size: 16px; /* 16px = pas de zoom auto sur iPhone */
 }
 textarea { resize: vertical; }
-input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
 
 /* ───── Squelette de l'app ───── */
 .top {
@@ -195,7 +195,10 @@ img.avatar { object-fit: cover; }
   width: 100%; display: flex; align-items: center; gap: 10px; padding: 12px 14px;
   border: 0; background: transparent; text-align: left; cursor: pointer;
 }
-.post-move { padding: 0 14px 10px; font-size: 1.1rem; }
+.post-move { padding: 0 14px 10px; font-size: 1.1rem; display: flex; flex-direction: column; gap: 2px; }
+.post-move h2 { font-size: inherit; }
+.post div.post-head { cursor: default; }
+.reason { padding: 0 14px 10px; color: var(--muted); font-style: italic; white-space: pre-wrap; overflow-wrap: anywhere; }
 .post .video { border-radius: 0; display: block; }
 .post .novideo { margin: 0 14px; padding: 16px; }
 .post-foot { font-weight: 700; font-size: .9rem; }
@@ -224,7 +227,11 @@ dialog::backdrop { background: rgb(0 0 0 / .6); }
 .sheet-body { padding: 16px 18px calc(24px + env(safe-area-inset-bottom)); }
 .stack { display: flex; flex-direction: column; gap: 14px; }
 .meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: .9rem; }
-.video { width: 100%; max-height: 60dvh; border-radius: 12px; background: #000; }
+.video { width: 100%; max-height: 60dvh; border-radius: 12px; background: #000; cursor: pointer; }
+.demo summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+.demo .video { margin-top: 10px; }
+.chip.points { color: var(--accent); }
+.notif.proposal strong { color: var(--accent); }
 .novideo, .drop {
   display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 22px; text-align: center;
   border: 1.5px dashed var(--line); border-radius: 12px; color: var(--muted);
@@ -280,28 +287,57 @@ h3 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: 
 @keyframes pulse { 50% { opacity: .5; } }
 @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
 .propose { margin-top: 16px; }
-.proposal { display: flex; flex-direction: column; gap: 8px; }
 .avatar.small { width: 30px; height: 30px; font-size: .8rem; }
 .rank .row { position: relative; }
 .pastille { position: absolute; top: -5px; left: -5px; width: 16px; height: 16px; border-radius: 50%; background: var(--ko); border: 2px solid var(--bg); }
 .post .quick { padding: 0 14px 14px; }
 .seg button { font-size: .82rem; padding: 0 2px; white-space: nowrap; }
-.chat { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
-.chat li { display: flex; align-items: flex-end; gap: 8px; max-width: 85%; }
-.chat li.mine { align-self: flex-end; }
-.chat li > div { padding: 8px 12px; border-radius: 16px 16px 16px 4px; background: var(--surface); }
-.chat li.mine > div { border-radius: 16px 16px 4px 16px; background: color-mix(in srgb, var(--accent) 16%, var(--surface)); }
-.chat li.empty { max-width: none; display: block; }
-.chat strong { display: block; font-size: .8rem; color: var(--muted); }
-.chat p { white-space: pre-wrap; overflow-wrap: anywhere; }
-.chat small { font-size: .72rem; }
-.chat-form {
-  position: sticky; bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 8px);
-  display: flex; gap: 8px; margin-top: auto; padding: 8px; border-radius: var(--r); background: var(--bg);
-}
-/* chat : la page prend tout l'écran, la barre pour écrire reste collée au menu même avec peu de messages */
-#app:has(.chat-form) { display: flex; flex-direction: column; min-height: 100dvh; }
-#app:has(.chat-form) .view { flex: 1; width: 100%; padding-bottom: calc(var(--nav-h) + 8px + env(safe-area-inset-bottom)); }
-.chat-form input { flex: 1; min-width: 0; }
 .tabs a { position: relative; }
 .tabs a.unread::after { content: ""; position: absolute; top: 9px; left: calc(50% + 7px); width: 10px; height: 10px; border-radius: 50%; background: var(--ko); border: 2px solid var(--surface); }
+/* mode dark = la compétition sur béton : l'app passe du vert au rouge */
+:root.dark { --bg: #120b0d; --surface: #1d1316; --surface-2: #2a1b1f; --line: #3d272c; --accent: #ff3b4f; --accent-ink: #fff; }
+.mode { padding: 2px 6px; border-radius: 6px; background: var(--accent); color: var(--accent-ink); font-size: .65rem; font-weight: 800; letter-spacing: .08em; }
+.dark-btn[aria-pressed="true"] { color: var(--accent); }
+.comp { display: block; color: var(--accent); font-weight: 600; }
+:root:not(.dark) .mode { display: none; }
+
+/* ───── Animations : courtes pour ne pas gêner (coupées si le téléphone demande moins de mouvement) ───── */
+.tabs a { transition: color .2s; }
+.tabs a[aria-current="page"] svg { animation: tab-pop .35s cubic-bezier(.3,1.6,.5,1); }
+dialog[open]::backdrop { animation: fade .2s ease-out; }
+.sheet-body > .stack > * { animation: rise .26s ease-out both; }
+.sheet-body > .stack > :nth-child(2) { animation-delay: .04s; }
+.sheet-body > .stack > :nth-child(3) { animation-delay: .08s; }
+.sheet-body > .stack > :nth-child(n+4) { animation-delay: .12s; }
+.bar span { animation: grow .7s cubic-bezier(.2,.8,.2,1) both; }
+/* changement de mode : pas de fondu par défaut, le cercle est animé par app.js */
+::view-transition-old(root), ::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
+
+/* pop-up au centre (move validé, demande envoyée, vote lancé, pendant ton absence) */
+dialog.pop[open] {
+  width: calc(100% - 40px); max-width: 360px; margin: auto; border-radius: 22px; border-bottom: 1px solid var(--line);
+  overflow: visible; text-align: center; animation: pop-in .32s cubic-bezier(.2,1.3,.4,1);
+}
+.pop-body { display: flex; flex-direction: column; gap: 12px; padding: 26px 20px 20px; }
+.pop-body h2 { font-size: 1.35rem; }
+.pop-emoji { font-size: 3.4rem; line-height: 1; animation: bounce .6s .05s cubic-bezier(.3,1.7,.5,1) both; }
+.away { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; text-align: left; max-height: 45dvh; overflow-y: auto; }
+.away li { padding: 10px 12px; border-radius: 12px; background: var(--surface); font-weight: 600; }
+.away .ok { color: var(--ok); }
+.away .ko { color: var(--ko); }
+/* « Voir mon post » se remplit puis s'ouvre tout seul */
+.btn.primary.go { background: linear-gradient(90deg, rgb(255 255 255 / .28) 50%, transparent 0) right / 200% 100% no-repeat, var(--accent); animation: fill 2.2s linear both; }
+.confetti { position: absolute; inset: 0; pointer-events: none; }
+.confetti i { position: absolute; top: 18%; width: 8px; height: 12px; border-radius: 2px; animation: confetti 1.3s var(--d) cubic-bezier(.2,.6,.4,1) both; }
+@keyframes tab-pop { 40% { scale: 1.25; } }
+@keyframes fade { from { opacity: 0; } }
+@keyframes rise { from { opacity: 0; translate: 0 8px; } }
+@keyframes grow { from { width: 0; } }
+@keyframes pop-in { from { opacity: 0; scale: .85; } }
+@keyframes bounce { from { scale: 0; rotate: -25deg; } }
+@keyframes fill { to { background-position: left; } }
+@keyframes confetti {
+  0% { transform: translate(0, 0) scale(.3); }
+  25% { transform: translate(calc(var(--x) * .5), -80px) rotate(calc(var(--r) * .3)); opacity: 1; }
+  100% { transform: translate(var(--x), 260px) rotate(var(--r)); opacity: 0; }
+}

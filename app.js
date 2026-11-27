@@ -17,7 +17,7 @@ let hidden = new Set(); // id des moves que j'ai cachés de ma liste
 let routeToken = 0;
 let filter = 'all', search = ''; // gardés entre deux affichages de "Mes moves" (et des profils)
 let postFilter = 'all';          // pareil pour "Posts"
-let voteFilter = 'open';         // pareil pour "Vote"
+let voteFilter = 'open', voteSearch = ''; // pareil pour "Vote"
 // mode dark = la 2e compétition, sur béton (l'app passe en rouge) : mêmes moves, mais posts, avis et classement à part.
 // Gardé sur ce téléphone.
 let dark = localStorage.getItem('pk-dark') === '1';
@@ -552,12 +552,23 @@ async function votesView() {
   const rows = await q(sb.from('move_votes').select('*, profiles!move_votes_user_id_fkey(username,avatar_path), move_ballots(user_id,ok)')
     .in('status', voteFilter === 'refused' ? ['refused', 'replaced'] : [voteFilter]).order('created_at', { ascending: false }).limit(50));
   const urls = await signedUrls(rows.map(v => v.demo_path).filter(Boolean));
+  const feed = h('div', { class: 'feed' });
+  const draw = () => {
+    const s = voteSearch.trim().toLowerCase();
+    const shown = rows.filter(v => (moves.find(m => m.id === v.move_id)?.name ?? '').toLowerCase().includes(s));
+    feed.querySelectorAll('video').forEach(v => onScreen.unobserve(v));
+    feed.replaceChildren(...(shown.length ? shown.map(v => voteCard(v, urls.get(v.demo_path), rows)) // rows entier : on y cherche le vote d'origine
+      : [empty(rows.length ? 'Aucun vote ne correspond.'
+        : { open: 'Aucun vote en cours. Lance le premier !', passed: 'Aucun vote adopté pour l’instant.', refused: 'Aucun vote refusé.' }[voteFilter])]));
+  };
+  draw();
   return [h('h1', { class: 'page-title' }, 'Vote'),
     h('p', { class: 'muted sub' }, 'Change la place d’un move dans la liste ou sa vidéo démo · 4 pour = adopté, 2 contre = refusé'),
     h('button', { class: 'btn primary block', onclick: () => newVote() }, '＋ Lancer un vote'),
-    segmented('Filtrer les votes', [['open', 'En cours'], ['passed', 'Validés'], ['refused', 'Refusés']], voteFilter, k => { voteFilter = k; route(); }),
-    rows.length ? h('div', { class: 'feed' }, rows.map(v => voteCard(v, urls.get(v.demo_path), rows)))
-      : empty({ open: 'Aucun vote en cours. Lance le premier !', passed: 'Aucun vote adopté pour l’instant.', refused: 'Aucun vote refusé.' }[voteFilter])];
+    h('div', { class: 'toolbar' },
+      h('input', { type: 'search', placeholder: 'Chercher un move…', 'aria-label': 'Chercher les votes d’un move', value: voteSearch, oninput: e => { voteSearch = e.target.value; draw(); } }),
+      segmented('Filtrer les votes', [['open', 'En cours'], ['passed', 'Validés'], ['refused', 'Refusés']], voteFilter, k => { voteFilter = k; route(); })),
+    feed];
 }
 
 function voteCard(v, url, rows) {
@@ -608,8 +619,14 @@ function voteCard(v, url, rows) {
 // nouveau vote ; pre = un vote refusé à reproposer (pareil, ou en changeant la place / la vidéo)
 function newVote(pre = {}) {
   let kind = pre.demo_path ? 'demo' : 'place';
-  const moveSel = h('select', { 'aria-label': 'Move' }, h('option', { value: '' }, 'Choisis un move…'),
-    moves.map(m => h('option', { value: m.id, selected: m.id === pre.move_id }, `n° ${m.position} · ${m.name}`)));
+  const opts = moves.map(m => h('option', { value: m.id, selected: m.id === pre.move_id }, `n° ${m.position} · ${m.name}`));
+  const moveSel = h('select', { 'aria-label': 'Move' }, h('option', { value: '' }, 'Choisis un move…'), opts);
+  const find = h('input', { type: 'search', placeholder: 'Chercher un move (nom ou n°)…', 'aria-label': 'Chercher un move', oninput: () => {
+    const s = find.value.trim().toLowerCase(), keep = moveSel.value, hits = opts.filter(o => o.textContent.toLowerCase().includes(s));
+    moveSel.replaceChildren(h('option', { value: '' }, hits.length ? 'Choisis un move…' : 'Aucun move trouvé'), ...hits);
+    // garde le move choisi s'il est encore dans la liste, sinon prend le 1er trouvé
+    moveSel.value = hits.some(o => o.value === keep) ? keep : s && hits[0] ? hits[0].value : '';
+  } });
   const pos = h('input', { type: 'number', min: 1, max: moves.length, inputmode: 'numeric', value: pre.new_position ?? '' });
   const reason = h('textarea', { rows: 2, maxlength: 500, placeholder: 'Ex. : plus facile que le move d’avant' }, pre.reason ?? '');
   const picker = videoPicker(pre.demo_path ? 'Choisir une autre vidéo (sinon la même)' : 'Choisir ou filmer la vidéo démo');
@@ -633,14 +650,14 @@ function newVote(pre = {}) {
         row.demo_path = file ? await uploadVideo(file, 'demo', picker.range(), p => (btn.textContent = `Compression… ${Math.round(p * 100)} %`)) : pre.demo_path;
       }
       await q(sb.from('move_votes').insert(row));
-      voteFilter = 'open';
+      voteFilter = 'open'; voteSearch = ''; // son nouveau vote ne doit pas être caché par une recherche
       location.hash === '#vote' ? (scrollTo(0, 0), route()) : (location.hash = '#vote'); // son vote apparaît en haut
       popup('🗳️', 'Vote lancé !', `La team vote pour ${kind === 'place' ? `mettre ${m.name} n° ${row.new_position}` : `la vidéo démo de ${m.name}`}. 4 pour = adopté, 2 contre = refusé.`);
     }).finally(() => (btn.textContent = label));
   };
   openSheet(pre.move_id ? 'Reproposer le vote' : 'Lancer un vote', h('form', { class: 'stack', onsubmit: save },
     segmented('Type de vote', [['place', '↕️ Changer sa place'], ['demo', '🎬 Vidéo démo']], kind, k => { kind = k; show(); }),
-    h('label', { class: 'field' }, h('span', {}, 'Move'), moveSel),
+    h('div', { class: 'field' }, h('span', {}, 'Move'), find, moveSel),
     placeBox, picker.el,
     h('label', { class: 'field' }, h('span', {}, 'Pourquoi ? (facultatif)'), reason),
     h('p', { class: 'hint' }, '4 pour = adopté pour toute la team · 2 contre = refusé'),
